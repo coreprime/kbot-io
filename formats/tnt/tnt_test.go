@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/coreprime/kbot/internal/testutil"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
 func TestLoadTNT(t *testing.T) {

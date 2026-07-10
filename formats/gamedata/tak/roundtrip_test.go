@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coreprime/kbot/formats/gamedata/common"
-	"github.com/coreprime/kbot/formats/tdf"
+	"github.com/coreprime/kbot-io/formats/gamedata/common"
+	"github.com/coreprime/kbot-io/formats/tdf"
 )
 
 // takRoot returns the unpacked TA:Kingdoms game directory, or "" to skip.

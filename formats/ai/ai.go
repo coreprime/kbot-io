@@ -43,9 +43,9 @@ type UnitLimit struct {
 
 // DifficultyPlan represents AI configuration for one difficulty level
 type DifficultyPlan struct {
-	Name    string        // e.g., "easy", "medium", "hard"
-	Weights []UnitWeight  // Weight directives
-	Limits  []UnitLimit   // Limit directives
+	Name    string       // e.g., "easy", "medium", "hard"
+	Weights []UnitWeight // Weight directives
+	Limits  []UnitLimit  // Limit directives
 }
 
 // AIFile represents a complete AI configuration file
@@ -69,27 +69,27 @@ const defaultPlanName = "default"
 // Parse parses an AI file from bytes
 func Parse(content []byte) (*AIFile, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(content))
-	
+
 	var plans []DifficultyPlan
 	var currentPlan *DifficultyPlan
-	
+
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
 		line := strings.TrimSpace(scanner.Text())
-		
+
 		// Skip empty lines and comments
 		if line == "" || strings.HasPrefix(line, "//") {
 			continue
 		}
-		
+
 		// Parse "plan <difficulty>" directive
 		if strings.HasPrefix(strings.ToLower(line), "plan ") {
 			// Save previous plan if exists
 			if currentPlan != nil {
 				plans = append(plans, *currentPlan)
 			}
-			
+
 			// Start new plan
 			difficulty := strings.TrimSpace(line[5:])
 			currentPlan = &DifficultyPlan{
@@ -99,7 +99,7 @@ func Parse(content []byte) (*AIFile, error) {
 			}
 			continue
 		}
-		
+
 		if currentPlan == nil {
 			// No `plan` directive yet — TA: Kingdoms profiles are typically
 			// laid out this way. Open a synthetic plan so the weights/limits
@@ -117,13 +117,13 @@ func Parse(content []byte) (*AIFile, error) {
 			if len(parts) >= 2 {
 				unitName := strings.ToUpper(parts[0])
 				weightStr := parts[1]
-				
+
 				weight, err := strconv.ParseFloat(weightStr, 64)
 				if err != nil {
 					// Skip invalid weight values
 					continue
 				}
-				
+
 				currentPlan.Weights = append(currentPlan.Weights, UnitWeight{
 					UnitName: unitName,
 					Weight:   weight,
@@ -131,20 +131,20 @@ func Parse(content []byte) (*AIFile, error) {
 			}
 			continue
 		}
-		
+
 		// Parse "Limit <unit> <value>" directive
 		if strings.HasPrefix(strings.ToLower(line), "limit ") {
 			parts := strings.Fields(line[6:])
 			if len(parts) >= 2 {
 				unitName := strings.ToUpper(parts[0])
 				maxStr := parts[1]
-				
+
 				maximum, err := strconv.Atoi(maxStr)
 				if err != nil {
 					// Skip invalid limit values
 					continue
 				}
-				
+
 				currentPlan.Limits = append(currentPlan.Limits, UnitLimit{
 					UnitName: unitName,
 					Maximum:  maximum,
@@ -153,15 +153,15 @@ func Parse(content []byte) (*AIFile, error) {
 			continue
 		}
 	}
-	
+
 	// Save last plan
 	if currentPlan != nil {
 		plans = append(plans, *currentPlan)
 	}
-	
+
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	
+
 	return &AIFile{Plans: plans}, nil
 }

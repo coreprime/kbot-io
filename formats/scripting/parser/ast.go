@@ -298,8 +298,8 @@ func (ce *CallExpression) String() string {
 
 // BracketExpression represents [expr] or <expr>
 type BracketExpression struct {
-	Token      Token // [ or <
-	Expression Expression
+	Token       Token // [ or <
+	Expression  Expression
 	BracketType string // "[]" or "<>"
 }
 

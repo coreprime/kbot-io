@@ -55,11 +55,11 @@ func NewParser(input string) *Parser {
 		lexer:  NewLexer(input, false),
 		errors: []string{},
 	}
-	
+
 	// Read two tokens so curToken and peekToken are both set
 	p.nextToken()
 	p.nextToken()
-	
+
 	return p
 }
 
@@ -67,7 +67,7 @@ func NewParser(input string) *Parser {
 func (p *Parser) nextToken() {
 	p.curToken = p.peekToken
 	p.peekToken = p.lexer.NextToken()
-	
+
 	// Skip newlines in most contexts
 	for p.peekToken.Type == TOKEN_NEWLINE {
 		p.peekToken = p.lexer.NextToken()
@@ -125,21 +125,21 @@ func (p *Parser) ParseProgram() *Program {
 	program := &Program{
 		Statements: []Statement{},
 	}
-	
+
 	for !p.curTokenIs(TOKEN_EOF) {
 		// Skip newlines at top level
 		if p.curTokenIs(TOKEN_NEWLINE) {
 			p.nextToken()
 			continue
 		}
-		
+
 		stmt := p.parseStatement()
 		if stmt != nil {
 			program.Statements = append(program.Statements, stmt)
 		}
 		p.nextToken()
 	}
-	
+
 	return program
 }
 
@@ -177,13 +177,13 @@ func (p *Parser) parseStatement() Statement {
 // parsePieceDeclaration parses: piece name1, name2, ...;
 func (p *Parser) parsePieceDeclaration() *PieceDeclaration {
 	stmt := &PieceDeclaration{Token: p.curToken}
-	
+
 	if !p.expectPeek(TOKEN_IDENT) {
 		return nil
 	}
-	
+
 	stmt.Names = []string{p.curToken.Literal}
-	
+
 	for p.peekTokenIs(TOKEN_COMMA) {
 		p.nextToken() // skip comma
 		if !p.expectPeek(TOKEN_IDENT) {
@@ -191,24 +191,24 @@ func (p *Parser) parsePieceDeclaration() *PieceDeclaration {
 		}
 		stmt.Names = append(stmt.Names, p.curToken.Literal)
 	}
-	
+
 	if !p.expectPeek(TOKEN_SEMICOLON) {
 		return nil
 	}
-	
+
 	return stmt
 }
 
 // parseStaticVarDeclaration parses: static-var name1, name2, ...;
 func (p *Parser) parseStaticVarDeclaration() *StaticVarDeclaration {
 	stmt := &StaticVarDeclaration{Token: p.curToken}
-	
+
 	if !p.expectPeek(TOKEN_IDENT) {
 		return nil
 	}
-	
+
 	stmt.Names = []string{p.curToken.Literal}
-	
+
 	for p.peekTokenIs(TOKEN_COMMA) {
 		p.nextToken() // skip comma
 		if !p.expectPeek(TOKEN_IDENT) {
@@ -216,11 +216,11 @@ func (p *Parser) parseStaticVarDeclaration() *StaticVarDeclaration {
 		}
 		stmt.Names = append(stmt.Names, p.curToken.Literal)
 	}
-	
+
 	if !p.expectPeek(TOKEN_SEMICOLON) {
 		return nil
 	}
-	
+
 	return stmt
 }
 
@@ -230,44 +230,44 @@ func (p *Parser) parseFunctionDeclaration() *FunctionDeclaration {
 		Token: p.curToken,
 		Name:  p.curToken.Literal,
 	}
-	
+
 	if !p.expectPeek(TOKEN_LPAREN) {
 		return nil
 	}
-	
+
 	stmt.Parameters = p.parseFunctionParameters()
-	
+
 	if !p.expectPeek(TOKEN_LBRACE) {
 		return nil
 	}
-	
+
 	stmt.Body = p.parseBlockStatement()
-	
+
 	return stmt
 }
 
 // parseFunctionParameters parses function parameter list
 func (p *Parser) parseFunctionParameters() []string {
 	params := []string{}
-	
+
 	if p.peekTokenIs(TOKEN_RPAREN) {
 		p.nextToken()
 		return params
 	}
-	
+
 	p.nextToken()
 	params = append(params, p.curToken.Literal)
-	
+
 	for p.peekTokenIs(TOKEN_COMMA) {
 		p.nextToken() // skip comma
 		p.nextToken() // get param
 		params = append(params, p.curToken.Literal)
 	}
-	
+
 	if !p.expectPeek(TOKEN_RPAREN) {
 		return nil
 	}
-	
+
 	return params
 }
 
@@ -277,111 +277,111 @@ func (p *Parser) parseBlockStatement() *BlockStatement {
 		Token:      p.curToken,
 		Statements: []Statement{},
 	}
-	
+
 	p.nextToken()
-	
+
 	for !p.curTokenIs(TOKEN_RBRACE) && !p.curTokenIs(TOKEN_EOF) {
 		// Skip newlines
 		if p.curTokenIs(TOKEN_NEWLINE) {
 			p.nextToken()
 			continue
 		}
-		
+
 		stmt := p.parseStatement()
 		if stmt != nil {
 			block.Statements = append(block.Statements, stmt)
 		}
 		p.nextToken()
 	}
-	
+
 	return block
 }
 
 // parseReturnStatement parses: return (expr);
 func (p *Parser) parseReturnStatement() *ReturnStatement {
 	stmt := &ReturnStatement{Token: p.curToken}
-	
+
 	p.nextToken()
-	
+
 	// Optional parentheses
 	hasParens := false
 	if p.curTokenIs(TOKEN_LPAREN) {
 		hasParens = true
 		p.nextToken()
 	}
-	
+
 	if !p.curTokenIs(TOKEN_SEMICOLON) {
 		stmt.ReturnValue = p.parseExpression(LOWEST)
 	}
-	
+
 	if hasParens {
 		if !p.expectPeek(TOKEN_RPAREN) {
 			return nil
 		}
 	}
-	
+
 	if p.peekTokenIs(TOKEN_SEMICOLON) {
 		p.nextToken()
 	}
-	
+
 	return stmt
 }
 
 // parseIfStatement parses: if (condition) { ... } else { ... }
 func (p *Parser) parseIfStatement() *IfStatement {
 	stmt := &IfStatement{Token: p.curToken}
-	
+
 	if !p.expectPeek(TOKEN_LPAREN) {
 		return nil
 	}
-	
+
 	p.nextToken()
 	stmt.Condition = p.parseExpression(LOWEST)
-	
+
 	if !p.expectPeek(TOKEN_RPAREN) {
 		return nil
 	}
-	
+
 	if !p.expectPeek(TOKEN_LBRACE) {
 		return nil
 	}
-	
+
 	stmt.Consequence = p.parseBlockStatement()
-	
+
 	if p.peekTokenIs(TOKEN_ELSE) {
 		p.nextToken()
-		
+
 		if !p.expectPeek(TOKEN_LBRACE) {
 			return nil
 		}
-		
+
 		stmt.Alternative = p.parseBlockStatement()
 	}
-	
+
 	return stmt
 }
 
 // parseWhileStatement parses: while (condition) { ... }
 func (p *Parser) parseWhileStatement() *WhileStatement {
 	stmt := &WhileStatement{Token: p.curToken}
-	
+
 	if !p.expectPeek(TOKEN_LPAREN) {
 		return nil
 	}
-	
+
 	p.nextToken()
 	stmt.Condition = p.parseExpression(LOWEST)
-	
+
 	if !p.expectPeek(TOKEN_RPAREN) {
 		return nil
 	}
-	
+
 	if !p.expectPeek(TOKEN_LBRACE) {
 		return nil
 	}
-	
+
 	stmt.Body = p.parseBlockStatement()
-	
+
 	return stmt
 }
 
@@ -392,7 +392,7 @@ func (p *Parser) parseCommandStatement() *CommandStatement {
 		Command: p.curToken.Literal,
 		Args:    []Expression{},
 	}
-	
+
 	// Parse arguments until semicolon
 	for !p.peekTokenIs(TOKEN_SEMICOLON) && !p.peekTokenIs(TOKEN_EOF) {
 		p.nextToken()
@@ -401,11 +401,11 @@ func (p *Parser) parseCommandStatement() *CommandStatement {
 			stmt.Args = append(stmt.Args, arg)
 		}
 	}
-	
+
 	if p.peekTokenIs(TOKEN_SEMICOLON) {
 		p.nextToken()
 	}
-	
+
 	return stmt
 }
 
@@ -413,11 +413,11 @@ func (p *Parser) parseCommandStatement() *CommandStatement {
 func (p *Parser) parseExpressionStatement() *ExpressionStatement {
 	stmt := &ExpressionStatement{Token: p.curToken}
 	stmt.Expression = p.parseExpression(LOWEST)
-	
+
 	if p.peekTokenIs(TOKEN_SEMICOLON) {
 		p.nextToken()
 	}
-	
+
 	return stmt
 }
 
@@ -425,7 +425,7 @@ func (p *Parser) parseExpressionStatement() *ExpressionStatement {
 func (p *Parser) parseExpression(precedence int) Expression {
 	// Parse prefix
 	var leftExp Expression
-	
+
 	switch p.curToken.Type {
 	case TOKEN_IDENT:
 		leftExp = &Identifier{Token: p.curToken, Value: p.curToken.Literal}
@@ -452,7 +452,7 @@ func (p *Parser) parseExpression(precedence int) Expression {
 			return nil
 		}
 	}
-	
+
 	// Parse infix
 	for !p.peekTokenIs(TOKEN_SEMICOLON) && precedence < p.peekPrecedence() {
 		switch p.peekToken.Type {
@@ -468,7 +468,7 @@ func (p *Parser) parseExpression(precedence int) Expression {
 			return leftExp
 		}
 	}
-	
+
 	return leftExp
 }
 
@@ -478,10 +478,10 @@ func (p *Parser) parsePrefixExpression() Expression {
 		Token:    p.curToken,
 		Operator: p.curToken.Literal,
 	}
-	
+
 	p.nextToken()
 	expression.Right = p.parseExpression(PREFIX)
-	
+
 	return expression
 }
 
@@ -492,11 +492,11 @@ func (p *Parser) parseInfixExpression(left Expression) Expression {
 		Operator: p.curToken.Literal,
 		Left:     left,
 	}
-	
+
 	precedence := p.curPrecedence()
 	p.nextToken()
 	expression.Right = p.parseExpression(precedence)
-	
+
 	return expression
 }
 
@@ -504,11 +504,11 @@ func (p *Parser) parseInfixExpression(left Expression) Expression {
 func (p *Parser) parseGroupedExpression() Expression {
 	p.nextToken()
 	exp := p.parseExpression(LOWEST)
-	
+
 	if !p.expectPeek(TOKEN_RPAREN) {
 		return nil
 	}
-	
+
 	return exp
 }
 
@@ -518,14 +518,14 @@ func (p *Parser) parseBracketExpression() Expression {
 		Token:       p.curToken,
 		BracketType: "[]",
 	}
-	
+
 	p.nextToken()
 	exp.Expression = p.parseExpression(LOWEST)
-	
+
 	if !p.expectPeek(TOKEN_RBRACKET) {
 		return nil
 	}
-	
+
 	return exp
 }
 
@@ -535,14 +535,14 @@ func (p *Parser) parseAngleBracketExpression() Expression {
 		Token:       p.curToken,
 		BracketType: "<>",
 	}
-	
+
 	p.nextToken()
 	exp.Expression = p.parseExpression(LOWEST)
-	
+
 	if !p.expectPeek(TOKEN_GT) {
 		return nil
 	}
-	
+
 	return exp
 }
 
@@ -559,25 +559,25 @@ func (p *Parser) parseCallExpression(function Expression) Expression {
 // parseCallArguments parses function call arguments
 func (p *Parser) parseCallArguments() []Expression {
 	args := []Expression{}
-	
+
 	if p.peekTokenIs(TOKEN_RPAREN) {
 		p.nextToken()
 		return args
 	}
-	
+
 	p.nextToken()
 	args = append(args, p.parseExpression(LOWEST))
-	
+
 	for p.peekTokenIs(TOKEN_COMMA) {
 		p.nextToken() // skip comma
 		p.nextToken() // get arg
 		args = append(args, p.parseExpression(LOWEST))
 	}
-	
+
 	if !p.expectPeek(TOKEN_RPAREN) {
 		return nil
 	}
-	
+
 	return args
 }
 
@@ -592,7 +592,7 @@ func (p *Parser) isCommand(t TokenType) bool {
 		TOKEN_SET_SIGNAL_MASK, TOKEN_GET, TOKEN_SET,
 		TOKEN_ATTACH_UNIT, TOKEN_DROP_UNIT,
 	}
-	
+
 	for _, cmd := range commands {
 		if t == cmd {
 			return true
@@ -608,7 +608,7 @@ func (p *Parser) isKeywordExpression(t TokenType) bool {
 		TOKEN_NOW, TOKEN_ACCELERATE, TOKEN_DECELERATE,
 		TOKEN_FROM, TOKEN_TYPE,
 	}
-	
+
 	for _, kw := range keywords {
 		if t == kw {
 			return true

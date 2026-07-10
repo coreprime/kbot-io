@@ -6,8 +6,8 @@
 //   - 2 bytes: uint16 unknown/flags
 //   - 256 × 2 bytes: uint16 offset table (offset from file start to each glyph, 0 = not present)
 //   - Glyph data: for each glyph at its offset:
-//     - 1 byte: pixel width
-//     - ceil(width * height / 8) bytes: 1bpp pixel data, MSB-first continuous bit stream
+//   - 1 byte: pixel width
+//   - ceil(width * height / 8) bytes: 1bpp pixel data, MSB-first continuous bit stream
 package fnt
 
 import (
@@ -21,17 +21,17 @@ import (
 
 // Glyph is a single character's bitmap data.
 type Glyph struct {
-	Char   int     // Character code (0-255)
-	Width  int     // Pixel width
-	Height int     // Pixel height (same as font height)
-	Pixels []bool  // Width × Height pixel values (true = set)
+	Char   int    // Character code (0-255)
+	Width  int    // Pixel width
+	Height int    // Pixel height (same as font height)
+	Pixels []bool // Width × Height pixel values (true = set)
 }
 
 // Font is a parsed FNT file.
 type Font struct {
-	Height  int       // Glyph height in pixels
-	Flags   uint16    // Unknown flags field
-	Glyphs  [256]*Glyph // Glyph for each character (nil if not present)
+	Height int         // Glyph height in pixels
+	Flags  uint16      // Unknown flags field
+	Glyphs [256]*Glyph // Glyph for each character (nil if not present)
 }
 
 // GlyphCount returns the number of defined glyphs.

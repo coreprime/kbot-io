@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coreprime/kbot/formats/scripting"
-	"github.com/coreprime/kbot/formats/scripting/compiler"
-	"github.com/coreprime/kbot/formats/scripting/decompiler"
-	"github.com/coreprime/kbot/internal/testutil"
+	"github.com/coreprime/kbot-io/formats/scripting"
+	"github.com/coreprime/kbot-io/formats/scripting/compiler"
+	"github.com/coreprime/kbot-io/formats/scripting/decompiler"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
 // TestAllCOBRoundtrip tests every .cob file from flat/scripts for byte-perfect roundtrip.

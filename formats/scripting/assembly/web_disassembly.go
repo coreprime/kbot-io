@@ -4,16 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/coreprime/kbot/formats/scripting"
+	"github.com/coreprime/kbot-io/formats/scripting"
 )
 
 // WebDisassemblyScript represents a single script for web visualization
 type WebDisassemblyScript struct {
-	Index        int                    `json:"index"`
-	Name         string                 `json:"name"`
-	Offset       uint32                 `json:"offset"`
-	Instructions []WebInstruction       `json:"instructions"`
-	Jumps        []WebJump              `json:"jumps"`
+	Index        int              `json:"index"`
+	Name         string           `json:"name"`
+	Offset       uint32           `json:"offset"`
+	Instructions []WebInstruction `json:"instructions"`
+	Jumps        []WebJump        `json:"jumps"`
 }
 
 // WebInstruction represents a single instruction for web display
@@ -45,13 +45,13 @@ type WebDisassemblyData struct {
 
 // WebDisassemblyHeader contains file-level metadata
 type WebDisassemblyHeader struct {
-	Version      uint32   `json:"version"`
-	ScriptCount  uint32   `json:"scriptCount"`
-	PieceCount   uint32   `json:"pieceCount"`
-	CodeLength   int      `json:"codeLength"`
-	PieceNames   []string `json:"pieceNames"`
-	StaticVars   []string `json:"staticVars"`
-	StaticCount  uint32   `json:"staticCount"`
+	Version     uint32   `json:"version"`
+	ScriptCount uint32   `json:"scriptCount"`
+	PieceCount  uint32   `json:"pieceCount"`
+	CodeLength  int      `json:"codeLength"`
+	PieceNames  []string `json:"pieceNames"`
+	StaticVars  []string `json:"staticVars"`
+	StaticCount uint32   `json:"staticCount"`
 }
 
 // GenerateWebDisassembly creates structured disassembly data for web visualization.
@@ -64,18 +64,18 @@ func GenerateWebDisassembly(cob *scripting.COB) (string, error) {
 		if i < len(cob.ScriptNames) && cob.ScriptNames[i] != "" {
 			scriptName = cob.ScriptNames[i]
 		}
-		
+
 		if scriptName == "Demo" {
 			instructions, err := cob.Disassemble(i)
 			if err == nil && len(instructions) >= 2 {
-				if instructions[0].Opcode == scripting.OP_PUSH_CONSTANT && 
-				   instructions[1].Opcode == scripting.OP_POP_STATIC {
+				if instructions[0].Opcode == scripting.OP_PUSH_CONSTANT &&
+					instructions[1].Opcode == scripting.OP_POP_STATIC {
 					globalNames[int(instructions[1].Operand)] = "unitviewer"
 				}
 			}
 		}
 	}
-	
+
 	// Generate header with file metadata
 	staticVars := []string{}
 	for i := 0; i < int(cob.NumberOfStaticVars); i++ {
@@ -86,7 +86,7 @@ func GenerateWebDisassembly(cob *scripting.COB) (string, error) {
 		}
 		staticVars = append(staticVars, varName)
 	}
-	
+
 	header := WebDisassemblyHeader{
 		Version:     cob.VersionSignature,
 		ScriptCount: cob.NumScripts,
@@ -96,20 +96,20 @@ func GenerateWebDisassembly(cob *scripting.COB) (string, error) {
 		StaticVars:  staticVars,
 		StaticCount: cob.NumberOfStaticVars,
 	}
-	
+
 	scripts := []WebDisassemblyScript{}
-	
+
 	for i := 0; i < int(cob.NumScripts); i++ {
 		scriptName := fmt.Sprintf("script_%d", i)
 		if i < len(cob.ScriptNames) && cob.ScriptNames[i] != "" {
 			scriptName = cob.ScriptNames[i]
 		}
-		
+
 		instructions, err := cob.Disassemble(i)
 		if err != nil {
 			continue
 		}
-		
+
 		// Convert instructions
 		webInsts := make([]WebInstruction, len(instructions))
 		for j, inst := range instructions {
@@ -123,10 +123,10 @@ func GenerateWebDisassembly(cob *scripting.COB) (string, error) {
 				Description: getInstructionDescription(cob, inst),
 			}
 		}
-		
+
 		// Analyze jumps
 		jumps := analyzeJumpsForWeb(instructions)
-		
+
 		scripts = append(scripts, WebDisassemblyScript{
 			Index:        i,
 			Name:         scriptName,
@@ -135,36 +135,36 @@ func GenerateWebDisassembly(cob *scripting.COB) (string, error) {
 			Jumps:        jumps,
 		})
 	}
-	
+
 	// Convert to JSON
 	data := WebDisassemblyData{
 		Header:  header,
 		Scripts: scripts,
 	}
-	
+
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal JSON: %w", err)
 	}
-	
+
 	return string(jsonData), nil
 }
 
 // analyzeJumpsForWeb finds all jumps and their targets
 func analyzeJumpsForWeb(instructions []scripting.Instruction) []WebJump {
 	var jumps []WebJump
-	
+
 	for i, inst := range instructions {
 		if inst.Opcode == scripting.OP_JUMP || inst.Opcode == scripting.OP_JUMP_IF_FALSE {
 			targetOffset := uint32(inst.Operand) * 4
 			targetIdx := findInstructionIndex(instructions, targetOffset)
-			
+
 			if targetIdx != -1 {
 				jumpType := "JUMP"
 				if inst.Opcode == scripting.OP_JUMP_IF_FALSE {
 					jumpType = "JUMP_IF_FALSE"
 				}
-				
+
 				jumps = append(jumps, WebJump{
 					FromIndex:  i,
 					FromOffset: inst.Offset,
@@ -176,7 +176,7 @@ func analyzeJumpsForWeb(instructions []scripting.Instruction) []WebJump {
 			}
 		}
 	}
-	
+
 	return jumps
 }
 

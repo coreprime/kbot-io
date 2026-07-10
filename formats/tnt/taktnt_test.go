@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coreprime/kbot/internal/testutil"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
 // TestTAKVersionAccepted confirms the parser now recognises the TA: Kingdoms

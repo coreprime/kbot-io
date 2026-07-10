@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coreprime/kbot/internal/testutil"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
 // TestPackedArchivesRoundTrip walks every HPI/UFO/CCX/GP3 archive under

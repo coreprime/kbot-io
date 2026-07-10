@@ -11,7 +11,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/coreprime/kbot/formats/hpi/common"
+	"github.com/coreprime/kbot-io/formats/hpi/common"
 )
 
 // Reader reads a Total Annihilation (v1) HPI archive.

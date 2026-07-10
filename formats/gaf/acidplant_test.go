@@ -3,7 +3,7 @@ package gaf
 import (
 	"testing"
 
-	"github.com/coreprime/kbot/internal/testutil"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
 func TestAcidplant(t *testing.T) {

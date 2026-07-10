@@ -5,9 +5,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/coreprime/kbot/formats/scripting"
-	"github.com/coreprime/kbot/formats/scripting/decompiler"
-	"github.com/coreprime/kbot/internal/testutil"
+	"github.com/coreprime/kbot-io/formats/scripting"
+	"github.com/coreprime/kbot-io/formats/scripting/decompiler"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
 func TestDecompilerStability(t *testing.T) {

@@ -4,17 +4,17 @@ import (
 	"fmt"
 	"strings"
 
-	scripting "github.com/coreprime/kbot/formats/scripting"
+	scripting "github.com/coreprime/kbot-io/formats/scripting"
 )
 
 // Block represents a control flow block (if, while, or sequence of statements)
 type Block struct {
-	Type       string      // "if", "while", "sequence"
-	Condition  string      // For if/while
-	ThenBlock  *Block      // For if/while
-	ElseBlock  *Block      // For if (optional)
-	Statements []string    // For sequence
-	Children   []*Block    // For nested blocks
+	Type       string   // "if", "while", "sequence"
+	Condition  string   // For if/while
+	ThenBlock  *Block   // For if/while
+	ElseBlock  *Block   // For if (optional)
+	Statements []string // For sequence
+	Children   []*Block // For nested blocks
 }
 
 // ControlFlowAnalyzer recursively processes instructions to build control flow structure
@@ -43,7 +43,7 @@ func NewControlFlowAnalyzer(decompiler *Decompiler, instructions []scripting.Ins
 func (cfa *ControlFlowAnalyzer) ProcessRange(start, end int, indent int) []string {
 	var output []string
 	i := start
-	
+
 	for i < end {
 		// Check for RETURN
 		if cfa.instructions[i].Opcode == scripting.OP_RETURN {
@@ -69,7 +69,7 @@ func (cfa *ControlFlowAnalyzer) ProcessRange(start, end int, indent int) []strin
 				continue
 			}
 		}
-		
+
 		// Regular statement
 		stmt := cfa.decompiler.translateInstruction(cfa.instructions[i], cfa.stack, cfa.paramNames, cfa.signalDef, cfa.globalNames)
 		if stmt != "" {
@@ -78,7 +78,7 @@ func (cfa *ControlFlowAnalyzer) ProcessRange(start, end int, indent int) []strin
 		}
 		i++
 	}
-	
+
 	return output
 }
 
@@ -88,27 +88,27 @@ func (cfa *ControlFlowAnalyzer) processConditional(i, end int, indent int) ([]st
 	if i+1 >= end {
 		return nil, i
 	}
-	
+
 	// Translate condition instruction
 	condInst := cfa.instructions[i]
 	stmt := cfa.decompiler.translateInstruction(condInst, cfa.stack, cfa.paramNames, cfa.signalDef, cfa.globalNames)
 	_ = stmt // Condition should be on stack
-	
+
 	// Get JUMP_IF_FALSE
 	jumpIfFalse := cfa.instructions[i+1]
 	if jumpIfFalse.Opcode != scripting.OP_JUMP_IF_FALSE {
 		return nil, i
 	}
-	
+
 	// Get condition from stack
 	if cfa.stack.isEmpty() {
 		return nil, i
 	}
 	condition := cfa.stack.pop()
-	
+
 	// Calculate jump target (operand is absolute word offset)
 	targetOffset := uint32(jumpIfFalse.Operand * 4)
-	
+
 	// Find the instruction at targetOffset
 	elseStart := -1
 	for j := i + 2; j < end; j++ {
@@ -117,16 +117,16 @@ func (cfa *ControlFlowAnalyzer) processConditional(i, end int, indent int) ([]st
 			break
 		}
 	}
-	
+
 	if elseStart == -1 {
 		elseStart = end // Jump goes past the end
 	}
-	
+
 	// Look for backward jump (while loop)
 	thenEnd := elseStart
 	isWhileLoop := false
 	conditionOffset := uint32(condInst.Offset)
-	
+
 	// Scan for JUMP in the then-block
 	for j := i + 2; j < elseStart; j++ {
 		if cfa.instructions[j].Opcode == scripting.OP_JUMP {
@@ -139,17 +139,17 @@ func (cfa *ControlFlowAnalyzer) processConditional(i, end int, indent int) ([]st
 			}
 		}
 	}
-	
+
 	// Clean condition
 	cleanCondition := cleanParentheses(condition)
-	
+
 	// Check if this is always-true (should be unwrapped)
 	// NEVER treat if (1) as always-true - preserve for byte-perfect roundtrip!
 	isAlwaysTrue := false
-	
+
 	var output []string
 	indentStr := strings.Repeat("\t", indent)
-	
+
 	// Emit if/while header (unless it's always-true)
 	if !isAlwaysTrue {
 		if isWhileLoop {
@@ -159,7 +159,7 @@ func (cfa *ControlFlowAnalyzer) processConditional(i, end int, indent int) ([]st
 		}
 		output = append(output, indentStr+"{")
 	}
-	
+
 	// Recursively process then-block
 	bodyIndent := indent + 1
 	if isAlwaysTrue {
@@ -167,17 +167,17 @@ func (cfa *ControlFlowAnalyzer) processConditional(i, end int, indent int) ([]st
 	}
 	thenBody := cfa.ProcessRange(i+2, thenEnd, bodyIndent)
 	output = append(output, thenBody...)
-	
+
 	if !isAlwaysTrue {
 		output = append(output, indentStr+"}")
 	}
-	
+
 	// Check for else block
 	nextI := thenEnd
 	if isWhileLoop {
 		nextI++ // Skip the backward JUMP
 	}
-	
+
 	return output, nextI
 }
 

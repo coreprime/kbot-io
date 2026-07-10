@@ -6,16 +6,16 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/coreprime/kbot/filesystem"
+	"github.com/coreprime/kbot-io/filesystem"
 )
 
 // Preprocessor handles BOS file preprocessing (#include, #define, #ifdef, etc.)
 type Preprocessor struct {
-	defines       map[string]string
-	includePaths  []string
-	processed     map[string]bool // Track processed files to avoid circular includes
-	conditionals  []bool          // Stack for #ifdef/#ifndef state
-	fs            filesystem.FileSystem
+	defines      map[string]string
+	includePaths []string
+	processed    map[string]bool // Track processed files to avoid circular includes
+	conditionals []bool          // Stack for #ifdef/#ifndef state
+	fs           filesystem.FileSystem
 }
 
 // NewPreprocessor creates a new preprocessor with a filesystem
@@ -122,7 +122,7 @@ func (p *Preprocessor) handleInclude(parts []string, baseDir string, result *str
 
 	// Try to find the file
 	var includePath string
-	
+
 	// First try relative to current file
 	candidate := filepath.Join(baseDir, filename)
 	if p.fs.Exists(candidate) {
@@ -227,7 +227,7 @@ func (p *Preprocessor) handleIf(line string) error {
 	// Simple evaluator for common patterns like "#if NUM_SMOKE_PIECES == 1"
 	// Extract expression after #if
 	expr := strings.TrimSpace(strings.TrimPrefix(line, "#if"))
-	
+
 	active := p.isActive()
 	result := active && p.evaluateExpression(expr)
 	p.conditionals = append(p.conditionals, result)
@@ -238,7 +238,7 @@ func (p *Preprocessor) handleIf(line string) error {
 func (p *Preprocessor) evaluateExpression(expr string) bool {
 	// Expand defines first
 	expanded := p.expandDefines(expr)
-	
+
 	// Handle common comparisons: ==, !=, >, <, >=, <=
 	for _, op := range []string{"==", "!=", ">=", "<=", ">", "<"} {
 		if strings.Contains(expanded, op) {
@@ -250,13 +250,13 @@ func (p *Preprocessor) evaluateExpression(expr string) bool {
 			}
 		}
 	}
-	
+
 	// Just a symbol - check if defined and non-zero
 	expanded = strings.TrimSpace(expanded)
 	if val, exists := p.defines[expanded]; exists {
 		return val != "0" && val != ""
 	}
-	
+
 	// Try to parse as number
 	return expanded != "0" && expanded != ""
 }
@@ -267,7 +267,7 @@ func (p *Preprocessor) compareValues(left, right, op string) bool {
 	var leftVal, rightVal int
 	_, err1 := fmt.Sscanf(left, "%d", &leftVal)
 	_, err2 := fmt.Sscanf(right, "%d", &rightVal)
-	
+
 	if err1 == nil && err2 == nil {
 		switch op {
 		case "==":
@@ -284,7 +284,7 @@ func (p *Preprocessor) compareValues(left, right, op string) bool {
 			return leftVal <= rightVal
 		}
 	}
-	
+
 	// String comparison
 	switch op {
 	case "==":
@@ -292,7 +292,7 @@ func (p *Preprocessor) compareValues(left, right, op string) bool {
 	case "!=":
 		return left != right
 	}
-	
+
 	return false
 }
 
@@ -330,13 +330,13 @@ func (p *Preprocessor) isActive() bool {
 // expandDefines expands all #define macros in a line
 func (p *Preprocessor) expandDefines(line string) string {
 	result := line
-	
+
 	// Sort defines by length (longest first) to handle overlapping names
 	var names []string
 	for name := range p.defines {
 		names = append(names, name)
 	}
-	
+
 	// Simple word boundary replacement
 	for _, name := range names {
 		value := p.defines[name]
@@ -344,6 +344,6 @@ func (p *Preprocessor) expandDefines(line string) string {
 		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
 		result = re.ReplaceAllString(result, value)
 	}
-	
+
 	return result
 }

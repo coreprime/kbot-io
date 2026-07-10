@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/coreprime/kbot/formats/scripting"
-	"github.com/coreprime/kbot/internal/testutil"
+	"github.com/coreprime/kbot-io/formats/scripting"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
 func TestLintRealCOB(t *testing.T) {
@@ -56,12 +56,12 @@ func TestLintRealCOB(t *testing.T) {
 func TestInvalidCallRule(t *testing.T) {
 	// Build a minimal COB with a CALL_SCRIPT to a non-existent index.
 	cob := &scripting.COB{
-		VersionSignature: 4,
-		NumScripts:       2,
-		NumPieces:        1,
-		ScriptNames:      []string{"Create", "Helper"},
-		PieceNames:       []string{"base"},
-		ScriptCodeIndices: []uint32{0, 5},
+		VersionSignature:   4,
+		NumScripts:         2,
+		NumPieces:          1,
+		ScriptNames:        []string{"Create", "Helper"},
+		PieceNames:         []string{"base"},
+		ScriptCodeIndices:  []uint32{0, 5},
 		NumberOfStaticVars: 0,
 	}
 

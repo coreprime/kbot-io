@@ -1,6 +1,6 @@
 package ta
 
-import "github.com/coreprime/kbot/formats/gamedata/common"
+import "github.com/coreprime/kbot-io/formats/gamedata/common"
 
 // Map wraps a mission/map .ota file, whose sole top-level section is
 // [GlobalHeader]. Decode a file with

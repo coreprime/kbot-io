@@ -29,14 +29,14 @@ type rawObject struct {
 
 // rawPrimitive is the on-disk 32-byte primitive header.
 type rawPrimitive struct {
-	ColorIndex              int32
-	NumberOfVertexIndexes   int32
-	Always0                 int32
+	ColorIndex               int32
+	NumberOfVertexIndexes    int32
+	Always0                  int32
 	OffsetToVertexIndexArray int32
-	OffsetToTextureName     int32
-	Unknown1                int32
-	Unknown2                int32
-	IsColored               int32
+	OffsetToTextureName      int32
+	Unknown1                 int32
+	Unknown2                 int32
+	IsColored                int32
 }
 
 // Vertex is a 3D point (fixed-point integers).

@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/coreprime/kbot/formats/tdf"
+	"github.com/coreprime/kbot-io/formats/tdf"
 )
 
 // RGBString is a colour stored in game data as a space-separated "R G B" triple

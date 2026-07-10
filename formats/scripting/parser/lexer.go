@@ -286,7 +286,7 @@ func (l *Lexer) skipLineComment() {
 func (l *Lexer) skipBlockComment() {
 	l.readChar() // skip /
 	l.readChar() // skip *
-	
+
 	for l.ch != 0 {
 		if l.ch == '*' && l.peekChar() == '/' {
 			l.readChar()
@@ -322,17 +322,17 @@ func (l *Lexer) readIdentifier() string {
 // readNumber reads a number (integer or decimal)
 func (l *Lexer) readNumber() string {
 	position := l.position
-	
+
 	// Handle negative sign
 	if l.ch == '-' {
 		l.readChar()
 	}
-	
+
 	// Read digits
 	for unicode.IsDigit(rune(l.ch)) {
 		l.readChar()
 	}
-	
+
 	// Handle decimal point
 	if l.ch == '.' && unicode.IsDigit(rune(l.peekChar())) {
 		l.readChar()
@@ -340,7 +340,7 @@ func (l *Lexer) readNumber() string {
 			l.readChar()
 		}
 	}
-	
+
 	return l.input[position:l.position]
 }
 
@@ -348,14 +348,14 @@ func (l *Lexer) readNumber() string {
 func (l *Lexer) readString() string {
 	position := l.position + 1 // skip opening quote
 	l.readChar()
-	
+
 	for l.ch != '"' && l.ch != 0 {
 		if l.ch == '\\' && l.peekChar() == '"' {
 			l.readChar() // skip backslash
 		}
 		l.readChar()
 	}
-	
+
 	str := l.input[position:l.position]
 	l.readChar() // skip closing quote
 	return str
@@ -375,7 +375,7 @@ func (l *Lexer) readBlockComment() string {
 	position := l.position
 	l.readChar() // skip /
 	l.readChar() // skip *
-	
+
 	for l.ch != 0 {
 		if l.ch == '*' && l.peekChar() == '/' {
 			l.readChar()
@@ -388,7 +388,7 @@ func (l *Lexer) readBlockComment() string {
 		}
 		l.readChar()
 	}
-	
+
 	return l.input[position:l.position]
 }
 

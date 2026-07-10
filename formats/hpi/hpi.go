@@ -21,9 +21,9 @@ import (
 	"io"
 	"os"
 
-	"github.com/coreprime/kbot/formats/hpi/common"
-	"github.com/coreprime/kbot/formats/hpi/v1"
-	"github.com/coreprime/kbot/formats/hpi/v2"
+	"github.com/coreprime/kbot-io/formats/hpi/common"
+	"github.com/coreprime/kbot-io/formats/hpi/v1"
+	"github.com/coreprime/kbot-io/formats/hpi/v2"
 )
 
 // Entry is a file or directory node in an archive. It is shared by every

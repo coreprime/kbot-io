@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coreprime/kbot/formats/gamedata/common"
-	"github.com/coreprime/kbot/formats/tdf"
+	"github.com/coreprime/kbot-io/formats/gamedata/common"
+	"github.com/coreprime/kbot-io/formats/tdf"
 )
 
 // taRoot returns the unpacked TA 3.1 game directory, or "" to skip.

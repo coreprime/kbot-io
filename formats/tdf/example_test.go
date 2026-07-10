@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/coreprime/kbot/formats/tdf"
+	"github.com/coreprime/kbot-io/formats/tdf"
 )
 
 func ExampleParse() {

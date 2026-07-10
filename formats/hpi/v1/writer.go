@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/coreprime/kbot/formats/hpi/common"
+	"github.com/coreprime/kbot-io/formats/hpi/common"
 )
 
 const chunkMaxDecomp = 65536

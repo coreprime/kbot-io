@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/coreprime/kbot/filesystem"
+	"github.com/coreprime/kbot-io/filesystem"
 )
 
 // COB represents a compiled BOS script (Total Annihilation format).
@@ -82,7 +82,7 @@ func LoadFromReader(r io.Reader) (*COB, error) {
 	if len(allData) < 44 {
 		return nil, fmt.Errorf("file too small for header")
 	}
-	
+
 	cob.VersionSignature = binary.LittleEndian.Uint32(allData[0:4])
 	cob.NumScripts = binary.LittleEndian.Uint32(allData[4:8])
 	cob.NumPieces = binary.LittleEndian.Uint32(allData[8:12])
@@ -201,9 +201,9 @@ func readCString(data []byte) string {
 // Instruction represents a single COB bytecode instruction (nTA format)
 type Instruction struct {
 	Offset   uint32
-	Opcode   uint32  // Full 32-bit nTA opcode
-	Operand  int32   // First 32-bit parameter (for 1-param opcodes)
-	Operand2 int32   // Second 32-bit parameter (for 2-param opcodes like TURN)
+	Opcode   uint32 // Full 32-bit nTA opcode
+	Operand  int32  // First 32-bit parameter (for 1-param opcodes)
+	Operand2 int32  // Second 32-bit parameter (for 2-param opcodes like TURN)
 }
 
 // Disassemble disassembles the bytecode into instructions
@@ -236,21 +236,21 @@ func (c *COB) Disassemble(scriptIndex int) ([]Instruction, error) {
 	instCount := 0
 	for pos < endPos && pos+4 <= uint32(len(c.Code)) {
 		// Read 32-bit LITTLE-ENDIAN opcode (as documented in ta-cob-fmt.txt)
-		opcode := uint32(c.Code[pos]) | (uint32(c.Code[pos+1]) << 8) | 
-		          (uint32(c.Code[pos+2]) << 16) | (uint32(c.Code[pos+3]) << 24)
+		opcode := uint32(c.Code[pos]) | (uint32(c.Code[pos+1]) << 8) |
+			(uint32(c.Code[pos+2]) << 16) | (uint32(c.Code[pos+3]) << 24)
 		// Check if this opcode expects inline parameters (Post Data)
 		var operand, operand2 int32
 		paramCount := OpcodeParamCount(opcode)
-		
+
 		if paramCount > 0 && pos+4+uint32(paramCount*4) <= uint32(len(c.Code)) {
 			// Read first parameter as little-endian (TA format)
-			operand = int32(uint32(c.Code[pos+4]) | (uint32(c.Code[pos+5]) << 8) | 
-			               (uint32(c.Code[pos+6]) << 16) | (uint32(c.Code[pos+7]) << 24))
-			
+			operand = int32(uint32(c.Code[pos+4]) | (uint32(c.Code[pos+5]) << 8) |
+				(uint32(c.Code[pos+6]) << 16) | (uint32(c.Code[pos+7]) << 24))
+
 			// Read second parameter if present
 			if paramCount >= 2 && pos+8+4 <= uint32(len(c.Code)) {
-				operand2 = int32(uint32(c.Code[pos+8]) | (uint32(c.Code[pos+9]) << 8) | 
-				                (uint32(c.Code[pos+10]) << 16) | (uint32(c.Code[pos+11]) << 24))
+				operand2 = int32(uint32(c.Code[pos+8]) | (uint32(c.Code[pos+9]) << 8) |
+					(uint32(c.Code[pos+10]) << 16) | (uint32(c.Code[pos+11]) << 24))
 			}
 		}
 
@@ -288,7 +288,7 @@ func (c *COB) SaveToFile(filename string) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	
+
 	return c.WriteToWriter(f)
 }
 

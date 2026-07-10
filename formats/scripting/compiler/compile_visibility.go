@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/coreprime/kbot/formats/scripting"
+	"github.com/coreprime/kbot-io/formats/scripting"
 )
 
 func (c *Compiler) compileHide(line string) error {

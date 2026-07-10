@@ -5,9 +5,9 @@ import (
 	"strconv"
 	"strings"
 
-	scripting "github.com/coreprime/kbot/formats/scripting"
-	"github.com/coreprime/kbot/formats/scripting/assembly"
-	"github.com/coreprime/kbot/formats/scripting/parser"
+	scripting "github.com/coreprime/kbot-io/formats/scripting"
+	"github.com/coreprime/kbot-io/formats/scripting/assembly"
+	"github.com/coreprime/kbot-io/formats/scripting/parser"
 )
 
 // Decompiler converts COB bytecode to BOS source or disassembly
@@ -50,7 +50,7 @@ func (d *Decompiler) Decompile() (string, error) {
 		}
 		sb.WriteString(";\n\n")
 	}
-	
+
 	// Detect Demo() function for unitviewer inference (must be BEFORE static-var declaration)
 	globalNames := make(map[int]string)
 	for i := 0; i < int(d.cob.NumScripts); i++ {
@@ -72,7 +72,7 @@ func (d *Decompiler) Decompile() (string, error) {
 			break // Only one Demo() function
 		}
 	}
-	
+
 	// Static variables
 	if d.cob.NumberOfStaticVars > 0 {
 		sb.WriteString("static-var")
@@ -89,26 +89,26 @@ func (d *Decompiler) Decompile() (string, error) {
 		}
 		sb.WriteString(";\n\n")
 	}
-	
+
 	// No signal define generation — preserve raw numeric values for roundtrip fidelity
 	globalSignalDefines := make(map[int]string) // empty — no substitution
-	
+
 	// Decompile each script
 	for i := 0; i < int(d.cob.NumScripts); i++ {
 		scriptName := fmt.Sprintf("script_%d", i)
 		if i < len(d.cob.ScriptNames) && d.cob.ScriptNames[i] != "" {
 			scriptName = d.cob.ScriptNames[i]
 		}
-		
+
 		script, err := d.decompileScript(i, scriptName, globalSignalDefines, globalNames)
 		if err != nil {
 			return "", fmt.Errorf("failed to decompile script %d (%s): %w", i, scriptName, err)
 		}
-		
+
 		sb.WriteString(script)
 		sb.WriteString("\n")
 	}
-	
+
 	return sb.String(), nil
 }
 
@@ -160,14 +160,14 @@ func (d *Decompiler) decompileScript(index int, name string, signalDefines map[i
 	if index >= len(d.cob.ScriptCodeIndices) {
 		return "", fmt.Errorf("invalid script index %d", index)
 	}
-	
+
 	instructions, err := d.cob.Disassemble(index)
 	if err != nil {
 		return "", err
 	}
-	
+
 	var sb strings.Builder
-	
+
 	// Detect parameters: if function starts with STACK_ALLOC, analyze local var usage
 	detectedParamCount := 0
 	if len(instructions) > 0 && instructions[0].Opcode == scripting.OP_STACK_ALLOC {
@@ -191,7 +191,7 @@ func (d *Decompiler) decompileScript(index int, name string, signalDefines map[i
 			}
 		}
 	}
-	
+
 	// Count STACK_ALLOC operations first — these are the canonical signal
 	// from Cavedog's compiler that a local slot is being reserved.
 	// TA emits them all up-front; TA: Kingdoms sometimes interleaves
@@ -226,7 +226,7 @@ func (d *Decompiler) decompileScript(index int, name string, signalDefines map[i
 	if maxLocal+1 > stackAllocCount {
 		stackAllocCount = maxLocal + 1
 	}
-	
+
 	// Check if we have a well-known signature with more parameters
 	// (handles output parameters that aren't read)
 	// But never exceed the actual STACK_ALLOC count from bytecode
@@ -237,15 +237,15 @@ func (d *Decompiler) decompileScript(index int, name string, signalDefines map[i
 	if paramCount > stackAllocCount {
 		paramCount = stackAllocCount
 	}
-	
+
 	// Build parameter name map
 	paramNames := make(map[int]string) // local index -> param name
-	
+
 	// Function signature with parameters
 	// Check for well-known function signatures first
 	if paramCount > 0 {
 		params := make([]string, paramCount)
-		
+
 		// Try to get well-known parameter names
 		if sig := parser.GetFunctionSignature(name); sig != nil && len(sig.ParamNames) >= paramCount {
 			// Use well-known names
@@ -260,12 +260,12 @@ func (d *Decompiler) decompileScript(index int, name string, signalDefines map[i
 				paramNames[i] = params[i]
 			}
 		}
-		
+
 		fmt.Fprintf(&sb, "%s(%s)\n{\n", name, strings.Join(params, ", "))
 	} else {
 		fmt.Fprintf(&sb, "%s()\n{\n", name)
 	}
-	
+
 	// Emit local variable declarations for non-parameter locals
 	if stackAllocCount > paramCount {
 		var localVars []string
@@ -276,7 +276,7 @@ func (d *Decompiler) decompileScript(index int, name string, signalDefines map[i
 		sb.WriteString(strings.Join(localVars, ", "))
 		sb.WriteString(";\n\n")
 	}
-	
+
 	// Use recursive control flow analyzer for better nested structure handling
 	analyzer := NewControlFlowAnalyzer(d, instructions, paramNames, signalDefines, globalNames)
 	body := analyzer.ProcessRange(0, len(instructions), 1)
@@ -285,251 +285,251 @@ func (d *Decompiler) decompileScript(index int, name string, signalDefines map[i
 		sb.WriteString(line)
 		sb.WriteString("\n")
 	}
-	
+
 	sb.WriteString("}\n")
 	return sb.String(), nil
-	
+
 	// OLD CODE BELOW - KEEPING FOR REFERENCE
 	/*
-	stack := newExprStack()
-	hasReturn := false
-	skip := make(map[int]bool) // Track which instructions to skip (already in if block)
-	
+		stack := newExprStack()
+		hasReturn := false
+		skip := make(map[int]bool) // Track which instructions to skip (already in if block)
 
-	
-	for i := 0; i < len(instructions); i++ {
-		if skip[i] {
-			continue
-		}
-		
-		inst := instructions[i]
-		if inst.Opcode == scripting.OP_RETURN {
-			hasReturn = true
-		}
-		
-		// Check for if statement pattern: instruction + JUMP_IF_FALSE
-		if i+1 < len(instructions) && instructions[i+1].Opcode == scripting.OP_JUMP_IF_FALSE {
-			// We have a potential if statement!
-			// Save condition instruction for while loop detection
-			conditionInst := inst
-			
-			// First translate current instruction (might push condition to stack)
-			d.translateInstruction(inst, stack, paramNames, signalDefines, globalNames)
-			
-			// Pop condition from stack
-			if stack.isEmpty() {
-				// No condition on stack, not a valid if pattern - treat as regular instruction
-				// Already translated, just continue
+
+
+		for i := 0; i < len(instructions); i++ {
+			if skip[i] {
 				continue
 			}
-			
-			condition := stack.pop() // Get the condition expression
-			
-			// Next instruction is JUMP_IF_FALSE
-			jumpInst := instructions[i+1]
-			i++ // Skip the JUMP_IF_FALSE in next iteration
-			// Jump operands are ABSOLUTE WORD OFFSETS within Code section
-			targetOffset := uint32(jumpInst.Operand) * 4
-			
-			// Find where jump lands (start of else block or after if)
-			elseStart := -1
-			for j := i + 1; j < len(instructions); j++ {
-				if instructions[j].Offset >= targetOffset {
-					elseStart = j
-					break
-				}
+
+			inst := instructions[i]
+			if inst.Opcode == scripting.OP_RETURN {
+				hasReturn = true
 			}
-			
-			// If elseStart == -1, the jump goes past end of script (implicit return)
-			// This means: if (cond) { ... return; } with no else
-			// Set elseStart to end of instructions for boundary checking
-			if elseStart == -1 {
-				elseStart = len(instructions)
-			}
-			
-			// Find end of then block (return or jump or else start)
-			thenEnd := elseStart
-			isWhileLoop := false
-			for j := i + 1; j < elseStart; j++ {
-				if instructions[j].Opcode == scripting.OP_RETURN {
-					thenEnd = j + 1
-					break
-				}
-				if instructions[j].Opcode == scripting.OP_JUMP {
-					// Check if backward jump (while loop)
-					// Jump operands are ABSOLUTE WORD OFFSETS within Code section
-					jumpTarget := uint32(instructions[j].Operand) * 4
-					conditionOffset := conditionInst.Offset
-					
-					// Backward jump? Check if target is before current instruction
-					isBackwardJump := jumpTarget < instructions[j].Offset
-					
-					// For while loop: backward jump that goes to condition or before
-					if isBackwardJump && jumpTarget <= conditionOffset {
-						// Backward jump - this is a while loop!
-						isWhileLoop = true
-						thenEnd = j  // Don't include the JUMP in the body
-						break
-					} else {
-						// Forward jump - might be end of if block, keep looking for backward jump
-						if !isWhileLoop {
-							// Haven't found while yet, this might be end of if block
-							thenEnd = j + 1
-						}
-						// Don't break - keep looking for backward jump
-					}
-				}
-			}
-			
-			// Check if this is an always-true condition (if (1))
-			// These are unconditional blocks that should be simplified
-			isAlwaysTrue := !isWhileLoop && condition == "1"
-			
-			// Strip redundant outer parentheses from condition
-			// E.g., "(severity <= 25)" -> "severity <= 25"
-			cleanCondition := condition
-			if len(cleanCondition) > 2 && cleanCondition[0] == '(' && cleanCondition[len(cleanCondition)-1] == ')' {
-				// Check if these are the OUTER parentheses (not part of a complex expression)
-				// Simple heuristic: if there's no operator at the same nesting level, strip them
-				inner := cleanCondition[1 : len(cleanCondition)-1]
-				if !strings.Contains(inner, "&&") && !strings.Contains(inner, "||") {
-					cleanCondition = inner
-				}
-			}
-			
-			// Generate if or while statement (skip wrapper for always-true)
-			if !isAlwaysTrue {
-				if isWhileLoop {
-					sb.WriteString(fmt.Sprintf("\twhile (%s)\n", cleanCondition))
-				} else {
-					sb.WriteString(fmt.Sprintf("\tif (%s)\n", cleanCondition))
-				}
-				sb.WriteString("\t{\n")
-			}
-			
-			// Emit then block
-			// Process instructions, but DON'T skip control flow patterns - they need recursive processing
-			for j := i + 1; j < thenEnd; j++ {
-				// Check if this is start of a nested control flow pattern
-				isNestedControlFlow := j+1 < len(instructions) && instructions[j+1].Opcode == scripting.OP_JUMP_IF_FALSE
-				
-				if isNestedControlFlow {
-					// Don't mark as skip - let main loop process this as nested if/while
-					// But we need to handle it here with proper indentation
-					// For now, skip it and let outer loop handle
+
+			// Check for if statement pattern: instruction + JUMP_IF_FALSE
+			if i+1 < len(instructions) && instructions[i+1].Opcode == scripting.OP_JUMP_IF_FALSE {
+				// We have a potential if statement!
+				// Save condition instruction for while loop detection
+				conditionInst := inst
+
+				// First translate current instruction (might push condition to stack)
+				d.translateInstruction(inst, stack, paramNames, signalDefines, globalNames)
+
+				// Pop condition from stack
+				if stack.isEmpty() {
+					// No condition on stack, not a valid if pattern - treat as regular instruction
+					// Already translated, just continue
 					continue
 				}
-				
-				skip[j] = true
-				thenInst := instructions[j]
-				if thenInst.Opcode == scripting.OP_RETURN {
-					hasReturn = true
-				}
-				stmt := d.translateInstruction(thenInst, stack, paramNames, signalDefines, globalNames)
-				if stmt != "" {
-					// Adjust indentation based on whether we have a wrapper block
-					if isAlwaysTrue {
-						sb.WriteString("\t")  // Normal indent
-					} else {
-						sb.WriteString("\t\t")  // Double indent inside block
+
+				condition := stack.pop() // Get the condition expression
+
+				// Next instruction is JUMP_IF_FALSE
+				jumpInst := instructions[i+1]
+				i++ // Skip the JUMP_IF_FALSE in next iteration
+				// Jump operands are ABSOLUTE WORD OFFSETS within Code section
+				targetOffset := uint32(jumpInst.Operand) * 4
+
+				// Find where jump lands (start of else block or after if)
+				elseStart := -1
+				for j := i + 1; j < len(instructions); j++ {
+					if instructions[j].Offset >= targetOffset {
+						elseStart = j
+						break
 					}
-					sb.WriteString(stmt)
-					sb.WriteString("\n")
 				}
-			}
-			
-			// Close block if we opened one
-			if !isAlwaysTrue {
-				sb.WriteString("\t}\n")
-			}
-			
-			// While loops don't have else blocks
-			if isWhileLoop {
-				i = thenEnd // Skip to after while body (JUMP not included in thenEnd)
-				continue
-			}
-			
-			// Check if there's an else block (only for if statements)
-			// If then ended with RETURN, there's no else (just exits function)
-			// If then ended with JUMP, there might be else content (need to check jump target)
-			hasElse := thenEnd < elseStart && instructions[thenEnd-1].Opcode == scripting.OP_JUMP
-			
-			// But if then ended with JUMP, check if the jump target is past the else start
-			// If so, there's real else content. If jump goes to elseStart, there's no else.
-			if hasElse && thenEnd > 0 && thenEnd <= len(instructions) && instructions[thenEnd-1].Opcode == scripting.OP_JUMP {
-				// Calculate where the JUMP goes (absolute word offset)
-				jumpTarget := uint32(instructions[thenEnd-1].Operand) * 4
-				
-				
-				// If jump goes directly to else start or beyond, there's no else content
-				// (but if elseStart is past end, hasElse is already correctly false)
-				if elseStart < len(instructions) && jumpTarget >= instructions[elseStart].Offset {
-					hasElse = false
-				} else if elseStart >= len(instructions) {
-					// Jump goes past end of script - no else block
-					hasElse = false
+
+				// If elseStart == -1, the jump goes past end of script (implicit return)
+				// This means: if (cond) { ... return; } with no else
+				// Set elseStart to end of instructions for boundary checking
+				if elseStart == -1 {
+					elseStart = len(instructions)
 				}
-			}
-			
-			if hasElse {
-				// There's an else block
-				
-				// Find end of else (return or next if or end)
-				elseEnd := len(instructions)
-				for j := elseStart; j < len(instructions); j++ {
+
+				// Find end of then block (return or jump or else start)
+				thenEnd := elseStart
+				isWhileLoop := false
+				for j := i + 1; j < elseStart; j++ {
 					if instructions[j].Opcode == scripting.OP_RETURN {
-						elseEnd = j + 1
+						thenEnd = j + 1
 						break
 					}
-					// Check for another if statement (else if)
-					if j+1 < len(instructions) && instructions[j+1].Opcode == scripting.OP_JUMP_IF_FALSE {
-						elseEnd = j
-						break
+					if instructions[j].Opcode == scripting.OP_JUMP {
+						// Check if backward jump (while loop)
+						// Jump operands are ABSOLUTE WORD OFFSETS within Code section
+						jumpTarget := uint32(instructions[j].Operand) * 4
+						conditionOffset := conditionInst.Offset
+
+						// Backward jump? Check if target is before current instruction
+						isBackwardJump := jumpTarget < instructions[j].Offset
+
+						// For while loop: backward jump that goes to condition or before
+						if isBackwardJump && jumpTarget <= conditionOffset {
+							// Backward jump - this is a while loop!
+							isWhileLoop = true
+							thenEnd = j  // Don't include the JUMP in the body
+							break
+						} else {
+							// Forward jump - might be end of if block, keep looking for backward jump
+							if !isWhileLoop {
+								// Haven't found while yet, this might be end of if block
+								thenEnd = j + 1
+							}
+							// Don't break - keep looking for backward jump
+						}
 					}
 				}
-				
-				sb.WriteString("\telse\n\t{\n")
-				
-				for j := elseStart; j < elseEnd; j++ {
+
+				// Check if this is an always-true condition (if (1))
+				// These are unconditional blocks that should be simplified
+				isAlwaysTrue := !isWhileLoop && condition == "1"
+
+				// Strip redundant outer parentheses from condition
+				// E.g., "(severity <= 25)" -> "severity <= 25"
+				cleanCondition := condition
+				if len(cleanCondition) > 2 && cleanCondition[0] == '(' && cleanCondition[len(cleanCondition)-1] == ')' {
+					// Check if these are the OUTER parentheses (not part of a complex expression)
+					// Simple heuristic: if there's no operator at the same nesting level, strip them
+					inner := cleanCondition[1 : len(cleanCondition)-1]
+					if !strings.Contains(inner, "&&") && !strings.Contains(inner, "||") {
+						cleanCondition = inner
+					}
+				}
+
+				// Generate if or while statement (skip wrapper for always-true)
+				if !isAlwaysTrue {
+					if isWhileLoop {
+						sb.WriteString(fmt.Sprintf("\twhile (%s)\n", cleanCondition))
+					} else {
+						sb.WriteString(fmt.Sprintf("\tif (%s)\n", cleanCondition))
+					}
+					sb.WriteString("\t{\n")
+				}
+
+				// Emit then block
+				// Process instructions, but DON'T skip control flow patterns - they need recursive processing
+				for j := i + 1; j < thenEnd; j++ {
+					// Check if this is start of a nested control flow pattern
+					isNestedControlFlow := j+1 < len(instructions) && instructions[j+1].Opcode == scripting.OP_JUMP_IF_FALSE
+
+					if isNestedControlFlow {
+						// Don't mark as skip - let main loop process this as nested if/while
+						// But we need to handle it here with proper indentation
+						// For now, skip it and let outer loop handle
+						continue
+					}
+
 					skip[j] = true
-					elseInst := instructions[j]
-					if elseInst.Opcode == scripting.OP_RETURN {
+					thenInst := instructions[j]
+					if thenInst.Opcode == scripting.OP_RETURN {
 						hasReturn = true
 					}
-					stmt := d.translateInstruction(elseInst, stack, paramNames, signalDefines, globalNames)
+					stmt := d.translateInstruction(thenInst, stack, paramNames, signalDefines, globalNames)
 					if stmt != "" {
-						sb.WriteString("\t\t")
+						// Adjust indentation based on whether we have a wrapper block
+						if isAlwaysTrue {
+							sb.WriteString("\t")  // Normal indent
+						} else {
+							sb.WriteString("\t\t")  // Double indent inside block
+						}
 						sb.WriteString(stmt)
 						sb.WriteString("\n")
 					}
 				}
-				
-				sb.WriteString("\t}\n")
-				
-				i = elseEnd - 1 // Skip to end of else block
-			} else {
-				i = thenEnd - 1 // Skip to end of then block
+
+				// Close block if we opened one
+				if !isAlwaysTrue {
+					sb.WriteString("\t}\n")
+				}
+
+				// While loops don't have else blocks
+				if isWhileLoop {
+					i = thenEnd // Skip to after while body (JUMP not included in thenEnd)
+					continue
+				}
+
+				// Check if there's an else block (only for if statements)
+				// If then ended with RETURN, there's no else (just exits function)
+				// If then ended with JUMP, there might be else content (need to check jump target)
+				hasElse := thenEnd < elseStart && instructions[thenEnd-1].Opcode == scripting.OP_JUMP
+
+				// But if then ended with JUMP, check if the jump target is past the else start
+				// If so, there's real else content. If jump goes to elseStart, there's no else.
+				if hasElse && thenEnd > 0 && thenEnd <= len(instructions) && instructions[thenEnd-1].Opcode == scripting.OP_JUMP {
+					// Calculate where the JUMP goes (absolute word offset)
+					jumpTarget := uint32(instructions[thenEnd-1].Operand) * 4
+
+
+					// If jump goes directly to else start or beyond, there's no else content
+					// (but if elseStart is past end, hasElse is already correctly false)
+					if elseStart < len(instructions) && jumpTarget >= instructions[elseStart].Offset {
+						hasElse = false
+					} else if elseStart >= len(instructions) {
+						// Jump goes past end of script - no else block
+						hasElse = false
+					}
+				}
+
+				if hasElse {
+					// There's an else block
+
+					// Find end of else (return or next if or end)
+					elseEnd := len(instructions)
+					for j := elseStart; j < len(instructions); j++ {
+						if instructions[j].Opcode == scripting.OP_RETURN {
+							elseEnd = j + 1
+							break
+						}
+						// Check for another if statement (else if)
+						if j+1 < len(instructions) && instructions[j+1].Opcode == scripting.OP_JUMP_IF_FALSE {
+							elseEnd = j
+							break
+						}
+					}
+
+					sb.WriteString("\telse\n\t{\n")
+
+					for j := elseStart; j < elseEnd; j++ {
+						skip[j] = true
+						elseInst := instructions[j]
+						if elseInst.Opcode == scripting.OP_RETURN {
+							hasReturn = true
+						}
+						stmt := d.translateInstruction(elseInst, stack, paramNames, signalDefines, globalNames)
+						if stmt != "" {
+							sb.WriteString("\t\t")
+							sb.WriteString(stmt)
+							sb.WriteString("\n")
+						}
+					}
+
+					sb.WriteString("\t}\n")
+
+					i = elseEnd - 1 // Skip to end of else block
+				} else {
+					i = thenEnd - 1 // Skip to end of then block
+				}
+
+				continue
 			}
-			
-			continue
+
+			// Regular instruction
+			stmt := d.translateInstruction(inst, stack, paramNames, signalDefines, globalNames)
+			if stmt != "" {
+				sb.WriteString("\t")
+				sb.WriteString(stmt)
+				sb.WriteString("\n")
+			}
 		}
-		
-		// Regular instruction
-		stmt := d.translateInstruction(inst, stack, paramNames, signalDefines, globalNames)
-		if stmt != "" {
-			sb.WriteString("\t")
-			sb.WriteString(stmt)
-			sb.WriteString("\n")
+
+		// Only add return if function doesn't already have one
+		if !hasReturn {
+			sb.WriteString("\treturn;\n")
 		}
-	}
-	
-	// Only add return if function doesn't already have one
-	if !hasReturn {
-		sb.WriteString("\treturn;\n")
-	}
-	
-	sb.WriteString("}\n")
-	return sb.String(), nil
+
+		sb.WriteString("}\n")
+		return sb.String(), nil
 	*/
 }
 
@@ -547,11 +547,11 @@ func (d *Decompiler) DisassembleScript(name string, format assembly.Format) (str
 			}
 		}
 	}
-	
+
 	if scriptIndex == -1 {
 		return "", fmt.Errorf("script '%s' not found", name)
 	}
-	
+
 	return d.disassembleScript(scriptIndex, scriptName, format)
 }
 
@@ -574,7 +574,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 	case scripting.OP_PUSH_CONSTANT: // 0x10
 		stack.push(fmt.Sprintf("%d", inst.Operand))
 		return ""
-		
+
 	case scripting.OP_PUSH_LOCAL_VAR: // 0x11
 		// Check if this local has a parameter name
 		localName := fmt.Sprintf("local_%d", inst.Operand)
@@ -583,7 +583,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		}
 		stack.push(localName)
 		return ""
-		
+
 	case scripting.OP_GET_UNIT_VALUE: // Get value from port
 		// Port number should be on stack
 		if !stack.isEmpty() {
@@ -593,7 +593,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			stack.push(fmt.Sprintf("get %s", portName))
 		}
 		return ""
-	
+
 	case scripting.OP_SET_VALUE: // Set value to port
 		// Stack has: [port, value]
 		if !stack.isEmpty() {
@@ -605,7 +605,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-	
+
 	case scripting.OP_PUSH_STATIC: // 0x12
 		globalName := fmt.Sprintf("global_%d", inst.Operand)
 		if name, ok := globalNames[int(inst.Operand)]; ok {
@@ -613,7 +613,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		}
 		stack.push(globalName)
 		return ""
-		
+
 	case scripting.OP_POP_LOCAL_VAR: // 0x14
 		// Check if this local has a parameter name
 		localName := fmt.Sprintf("local_%d", inst.Operand)
@@ -623,7 +623,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		if val := stack.pop(); val != "" {
 			return fmt.Sprintf("%s = %s;", localName, val)
 		}
-		
+
 	case scripting.OP_POP_STATIC: // 0x15
 		if val := stack.pop(); val != "" {
 			globalName := fmt.Sprintf("global_%d", inst.Operand)
@@ -632,7 +632,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 			return fmt.Sprintf("%s = %s;", globalName, val)
 		}
-	
+
 	case scripting.OP_RAND: // 0x19
 		// rand(low, high) - pops two values
 		if high := stack.pop(); high != "" {
@@ -641,7 +641,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-	
+
 	case scripting.OP_GET: // 0x10043000
 		// get(port, unitid, x, y, z) — complex game value query
 		// Consumes 5 stack values: z (top), y, x, unitid, port (deepest)
@@ -652,7 +652,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		port := stack.pop()
 		stack.push(fmt.Sprintf("get(%s, %s, %s, %s, %s)", port, uid, x, y, z))
 		return ""
-		
+
 	// Arithmetic operations
 	case scripting.OP_ADD: // 0x20
 		if b := stack.pop(); b != "" {
@@ -661,7 +661,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-		
+
 	case scripting.OP_SUB: // 0x21
 		if b := stack.pop(); b != "" {
 			if a := stack.pop(); a != "" {
@@ -669,7 +669,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-		
+
 	case scripting.OP_MUL: // 0x22
 		if b := stack.pop(); b != "" {
 			if a := stack.pop(); a != "" {
@@ -677,7 +677,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-		
+
 	case scripting.OP_DIV: // 0x23
 		if b := stack.pop(); b != "" {
 			if a := stack.pop(); a != "" {
@@ -685,7 +685,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-	
+
 	case scripting.OP_MOD: // 0x24
 		if b := stack.pop(); b != "" {
 			if a := stack.pop(); a != "" {
@@ -693,7 +693,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-	
+
 	// Bitwise operations
 	case scripting.OP_BITWISE_AND: // 0x28
 		if b := stack.pop(); b != "" {
@@ -702,7 +702,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-	
+
 	case scripting.OP_BITWISE_OR: // 0x29
 		if b := stack.pop(); b != "" {
 			if a := stack.pop(); a != "" {
@@ -710,7 +710,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-	
+
 	// play-sound consumes the sound id from the stack and pushes a return
 	// value; the BOS form is `play-sound <id> volume <vol>;`. Volume is
 	// inline. The pushed result is dropped via the POP_STACK that
@@ -794,7 +794,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			stack.push(fmt.Sprintf("~%s", val))
 		}
 		return ""
-		
+
 	// Comparison operations
 	case scripting.OP_LESS_THAN: // 0x64
 		if b := stack.pop(); b != "" {
@@ -803,7 +803,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-	
+
 	case scripting.OP_LESS_OR_EQUAL: // 0x65
 		if b := stack.pop(); b != "" {
 			if a := stack.pop(); a != "" {
@@ -811,7 +811,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-	
+
 	case scripting.OP_GREATER_THAN: // 0x66
 		if b := stack.pop(); b != "" {
 			if a := stack.pop(); a != "" {
@@ -819,7 +819,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-	
+
 	case scripting.OP_GREATER_EQUAL: // 0x67
 		if b := stack.pop(); b != "" {
 			if a := stack.pop(); a != "" {
@@ -827,7 +827,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-	
+
 	case scripting.OP_EQUAL: // 0x68
 		if b := stack.pop(); b != "" {
 			if a := stack.pop(); a != "" {
@@ -835,7 +835,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-	
+
 	case scripting.OP_NOT_EQUAL: // 0x69
 		if b := stack.pop(); b != "" {
 			if a := stack.pop(); a != "" {
@@ -843,7 +843,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-	
+
 	// Logical operations
 	case scripting.OP_LOGICAL_AND: // 0x70
 		if b := stack.pop(); b != "" {
@@ -852,7 +852,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-	
+
 	case scripting.OP_LOGICAL_OR: // 0x71
 		if b := stack.pop(); b != "" {
 			if a := stack.pop(); a != "" {
@@ -860,13 +860,13 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 		}
 		return ""
-	
+
 	case scripting.OP_LOGICAL_NOT: // 0x73
 		if val := stack.pop(); val != "" {
 			stack.push(fmt.Sprintf("!%s", val))
 		}
 		return ""
-		
+
 	// Animation/control operations
 	case scripting.OP_MOVE: // 0x10001000
 		// Format: move <piece> to <axis>-axis <distance> speed <speed>;
@@ -874,17 +874,17 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		// Post Data: piece#, axis#
 		pieceID := int(inst.Operand)
 		axisID := int(inst.Operand2)
-		
+
 		pieceName := fmt.Sprintf("piece_%d", pieceID)
 		if pieceID >= 0 && pieceID < len(d.cob.PieceNames) {
 			pieceName = d.cob.PieceNames[pieceID]
 		}
-		
+
 		axisName := "unknown"
 		if axisID >= 0 && axisID <= 2 {
 			axisName = []string{"x", "y", "z"}[axisID]
 		}
-		
+
 		// Pop TWO values: distance (top), then speed (deeper)
 		distance := stack.pop()
 		if distance == "" {
@@ -894,79 +894,79 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		if speed == "" {
 			speed = "0"
 		}
-		
+
 		return fmt.Sprintf("move %s to %s-axis <%s> speed <%s>;", pieceName, axisName, distance, speed)
-	
+
 	case scripting.OP_MOVE_NOW: // 0x1000B000
 		// Move immediately (no speed parameter)
 		// Stack (before): <position>
 		// Post Data: piece#, axis#
-		
+
 		position := stack.pop()
 		pieceID := inst.Operand
 		axisID := inst.Operand2
-		
+
 		pieceName := fmt.Sprintf("piece_%d", pieceID)
 		if int(pieceID) >= 0 && int(pieceID) < len(d.cob.PieceNames) {
 			pieceName = d.cob.PieceNames[int(pieceID)]
 		}
-		
+
 		axisName := "unknown"
 		if axisID >= 0 && axisID <= 2 {
 			axisName = []string{"x", "y", "z"}[axisID]
 		}
-		
+
 		return fmt.Sprintf("move %s to %s-axis <%s> now;", pieceName, axisName, position)
-	
+
 	case scripting.OP_TURN_NOW: // 0x1000C000
 		// Turn immediately (no speed parameter)
 		// Stack (before): <angle>
 		// Post Data: piece#, axis#
-		
+
 		angle := stack.pop()
 		pieceID := inst.Operand
 		axisID := inst.Operand2
-		
+
 		pieceName := fmt.Sprintf("piece_%d", pieceID)
 		if int(pieceID) >= 0 && int(pieceID) < len(d.cob.PieceNames) {
 			pieceName = d.cob.PieceNames[int(pieceID)]
 		}
-		
+
 		axisName := "unknown"
 		if axisID >= 0 && axisID <= 2 {
 			axisName = []string{"x", "y", "z"}[axisID]
 		}
-		
+
 		return fmt.Sprintf("turn %s to %s-axis <%s> now;", pieceName, axisName, angle)
-	
+
 	case scripting.OP_TURN: // 0x10002000
 		// TA COB format: turn <piece> to <axis>-axis <angle> speed <speed>
 		// Stack (before): <speed>, <direction/angle>
 		// Post Data: piece#, axis#
-		
+
 		// Pop from stack (in reverse order - speed first, then angle)
 		direction := stack.pop() // angle/direction (was pushed second)
 		speed := stack.pop()     // speed (was pushed first, so deeper)
-		
+
 		// Get piece# and axis# from Post Data parameters
 		pieceID := inst.Operand
 		axisID := inst.Operand2
-		
+
 		// Resolve piece name
 		pieceName := fmt.Sprintf("piece_%d", pieceID)
 		if int(pieceID) >= 0 && int(pieceID) < len(d.cob.PieceNames) {
 			pieceName = d.cob.PieceNames[int(pieceID)]
 		}
-		
+
 		// Resolve axis name (0=x, 1=y, 2=z)
 		axisName := "unknown"
 		if axisID >= 0 && axisID <= 2 {
 			axisName = []string{"x", "y", "z"}[axisID]
 		}
-		
+
 		return fmt.Sprintf("turn %s to %s-axis <%s> speed <%s>;",
 			pieceName, axisName, direction, speed)
-	
+
 	case scripting.OP_SPIN: // 0x10003000
 		// Format: spin <piece> around <axis>-axis speed <speed>;
 		// Post Data: piece#, axis# (two separate words, same as MOVE/TURN)
@@ -991,7 +991,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		accelRaw := stack.pop()
 
 		return fmt.Sprintf("spin %s around %s-axis speed <%s> accelerate <%s>;", pieceName, axisName, speedRaw, accelRaw)
-	
+
 	case scripting.OP_SHOW: // 0x10005000
 		// Format: show <piece>;
 		// Post Data: piece#
@@ -1001,7 +1001,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			pieceName = d.cob.PieceNames[pieceIdx]
 		}
 		return fmt.Sprintf("show %s;", pieceName)
-	
+
 	case scripting.OP_HIDE: // 0x10006000
 		// Format: hide <piece>;
 		// Post Data: piece#
@@ -1011,7 +1011,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			pieceName = d.cob.PieceNames[pieceIdx]
 		}
 		return fmt.Sprintf("hide %s;", pieceName)
-	
+
 	case scripting.OP_CACHE: // 0x10007000
 		// Format: cache <piece>;
 		pieceIdx := int(inst.Operand)
@@ -1029,7 +1029,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			pieceName = d.cob.PieceNames[pieceIdx]
 		}
 		return fmt.Sprintf("dont-cache %s;", pieceName)
-	
+
 	case scripting.OP_DONT_SHADE: // 0x1000F000
 		// Format: dont-shade <piece>;
 		pieceIdx := int(inst.Operand)
@@ -1038,7 +1038,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			pieceName = d.cob.PieceNames[pieceIdx]
 		}
 		return fmt.Sprintf("dont-shade %s;", pieceName)
-	
+
 	case scripting.OP_STOP_SPIN: // 0x10004000
 		// Format: stop-spin <piece> around <axis>-axis;
 		// Post Data: piece#, axis# (two separate words)
@@ -1062,53 +1062,75 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		decelRaw := stack.pop()
 
 		return fmt.Sprintf("stop-spin %s around %s-axis decelerate <%s>;", pieceName, axisName, decelRaw)
-	
+
 	case scripting.OP_EMIT_SFX: // 0x1000F000
 		// Format: emit-sfx <type> from <piece>;
 		// Stack: type (popped)
 		// Operand: piece#
-		
+
 		if !stack.isEmpty() {
 			sfxType := stack.pop()
 			pieceIdx := int(inst.Operand)
-			
+
 			pieceName := fmt.Sprintf("piece_%d", pieceIdx)
 			if pieceIdx >= 0 && pieceIdx < len(d.cob.PieceNames) {
 				pieceName = d.cob.PieceNames[pieceIdx]
 			}
-			
+
 			return fmt.Sprintf("emit-sfx %s from %s;", sfxType, pieceName)
 		}
 		return ""
-	
+
 	case scripting.OP_EXPLODE: // 0x10071000
 		// Format: explode <piece> type <flags>;
 		// Stack: type flags (popped)
 		// Post Data: piece# (in Operand)
-		
+
 		typeExpr := stack.pop() // Get type from stack (e.g., "256", "(256 | 1)")
 		pieceIdx := int(inst.Operand)
-		
+
 		pieceName := fmt.Sprintf("piece_%d", pieceIdx)
 		if pieceIdx >= 0 && pieceIdx < len(d.cob.PieceNames) {
 			pieceName = d.cob.PieceNames[pieceIdx]
 		}
-		
+
 		// Try to decode numeric type flags for readability
 		if typeNum, err := strconv.Atoi(typeExpr); err == nil {
 			var flagNames []string
-			if typeNum & 0x01 != 0 { flagNames = append(flagNames, "SHATTER") }
-			if typeNum & 0x02 != 0 { flagNames = append(flagNames, "EXPLODE_ON_HIT") }
-			if typeNum & 0x04 != 0 { flagNames = append(flagNames, "FALL") }
-			if typeNum & 0x08 != 0 { flagNames = append(flagNames, "SMOKE") }
-			if typeNum & 0x10 != 0 { flagNames = append(flagNames, "FIRE") }
-		if typeNum & 0x20 != 0 { flagNames = append(flagNames, "BITMAPONLY") }
-			if typeNum & 0x100 != 0 { flagNames = append(flagNames, "BITMAP1") }
-			if typeNum & 0x200 != 0 { flagNames = append(flagNames, "BITMAP2") }
-			if typeNum & 0x400 != 0 { flagNames = append(flagNames, "BITMAP3") }
-			if typeNum & 0x800 != 0 { flagNames = append(flagNames, "BITMAP4") }
-			if typeNum & 0x1000 != 0 { flagNames = append(flagNames, "BITMAP5") }
-			
+			if typeNum&0x01 != 0 {
+				flagNames = append(flagNames, "SHATTER")
+			}
+			if typeNum&0x02 != 0 {
+				flagNames = append(flagNames, "EXPLODE_ON_HIT")
+			}
+			if typeNum&0x04 != 0 {
+				flagNames = append(flagNames, "FALL")
+			}
+			if typeNum&0x08 != 0 {
+				flagNames = append(flagNames, "SMOKE")
+			}
+			if typeNum&0x10 != 0 {
+				flagNames = append(flagNames, "FIRE")
+			}
+			if typeNum&0x20 != 0 {
+				flagNames = append(flagNames, "BITMAPONLY")
+			}
+			if typeNum&0x100 != 0 {
+				flagNames = append(flagNames, "BITMAP1")
+			}
+			if typeNum&0x200 != 0 {
+				flagNames = append(flagNames, "BITMAP2")
+			}
+			if typeNum&0x400 != 0 {
+				flagNames = append(flagNames, "BITMAP3")
+			}
+			if typeNum&0x800 != 0 {
+				flagNames = append(flagNames, "BITMAP4")
+			}
+			if typeNum&0x1000 != 0 {
+				flagNames = append(flagNames, "BITMAP5")
+			}
+
 			if len(flagNames) > 1 {
 				flags := strings.Join(flagNames, " | ")
 				return fmt.Sprintf("explode %s type %s;", pieceName, flags)
@@ -1122,7 +1144,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 
 		// If not a simple number or no flags decoded, use the expression as-is
 		return fmt.Sprintf("explode %s type %s;", pieceName, typeExpr)
-	
+
 	case scripting.OP_SIGNAL: // 0x67
 		if val := stack.pop(); val != "" {
 			// Check if this is a known signal constant
@@ -1133,7 +1155,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 			return fmt.Sprintf("signal %s;", val)
 		}
-		
+
 	case scripting.OP_SET_SIGNAL_MASK: // 0x68
 		if val := stack.pop(); val != "" {
 			// Check if this is a known signal constant
@@ -1144,48 +1166,48 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			}
 			return fmt.Sprintf("set-signal-mask %s;", val)
 		}
-	
+
 	case scripting.OP_SLEEP: // 0x10013000
 		if duration := stack.pop(); duration != "" {
 			return fmt.Sprintf("sleep %s;", duration)
 		}
-	
+
 	case scripting.OP_WAIT_FOR_TURN: // 0x10011000
 		// Wait for piece to finish turning on axis
 		// Post Data: piece#, axis#
 		pieceID := inst.Operand
 		axisID := inst.Operand2
-		
+
 		pieceName := fmt.Sprintf("piece_%d", pieceID)
 		if int(pieceID) >= 0 && int(pieceID) < len(d.cob.PieceNames) {
 			pieceName = d.cob.PieceNames[int(pieceID)]
 		}
-		
+
 		axisName := "unknown"
 		if axisID >= 0 && axisID <= 2 {
 			axisName = []string{"x", "y", "z"}[axisID]
 		}
-		
+
 		return fmt.Sprintf("wait-for-turn %s around %s-axis;", pieceName, axisName)
-	
+
 	case scripting.OP_WAIT_FOR_MOVE: // 0x10012000
 		// Wait for piece to finish moving along axis
 		// Post Data: piece#, axis#
 		pieceID := inst.Operand
 		axisID := inst.Operand2
-		
+
 		pieceName := fmt.Sprintf("piece_%d", pieceID)
 		if int(pieceID) >= 0 && int(pieceID) < len(d.cob.PieceNames) {
 			pieceName = d.cob.PieceNames[int(pieceID)]
 		}
-		
+
 		axisName := "unknown"
 		if axisID >= 0 && axisID <= 2 {
 			axisName = []string{"x", "y", "z"}[axisID]
 		}
-		
+
 		return fmt.Sprintf("wait-for-move %s along %s-axis;", pieceName, axisName)
-		
+
 	// Control flow
 	case scripting.OP_CALL_SCRIPT: // 0x10062000
 		scriptName := fmt.Sprintf("script_%d", inst.Operand)
@@ -1206,7 +1228,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		paramCount := int(inst.Operand2)
 		params := popNReverse(stack, paramCount)
 		return fmt.Sprintf("start-script %s(%s);", scriptName, strings.Join(params, ", "))
-		
+
 	case scripting.OP_ATTACH_UNIT: // 0x10083000
 		// attach-unit <unitid> to <piece> <flag>
 		// Stack: flag (top), piece, unitid (deepest)
@@ -1214,31 +1236,31 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		piece := stack.pop()
 		uid := stack.pop()
 		return fmt.Sprintf("attach-unit %s to %s %s;", uid, piece, flag)
-	
+
 	case scripting.OP_DROP_UNIT: // 0x10084000
 		// drop-unit <unitid>
 		uid := stack.pop()
 		return fmt.Sprintf("drop-unit %s;", uid)
-	
+
 	case scripting.OP_RETURN: // 0x86
 		if val := stack.pop(); val != "" {
 			return fmt.Sprintf("return %s;", val)
 		}
 		return "return;"
-		
+
 	case scripting.OP_JUMP: // 0x82
 		// Control flow - can't easily reconstruct without CFG analysis
 		return ""
-		
+
 	case scripting.OP_JUMP_IF_FALSE: // 0x83
 		stack.pop() // Pop condition (will be reconstructed in if statement)
 		return ""
-		
+
 	default:
 		// Unknown/unimplemented opcode — skip silently.
 		return ""
 	}
-	
+
 	return ""
 }
 

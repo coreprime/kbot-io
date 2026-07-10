@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/coreprime/kbot/formats/scripting"
-	"github.com/coreprime/kbot/formats/scripting/decompiler"
+	"github.com/coreprime/kbot-io/formats/scripting"
+	"github.com/coreprime/kbot-io/formats/scripting/decompiler"
 )
 
 // Severity indicates how serious a diagnostic is.
@@ -33,11 +33,11 @@ func (s Severity) String() string {
 
 // Diagnostic is a single lint finding.
 type Diagnostic struct {
-	Rule     string   // rule identifier
+	Rule     string // rule identifier
 	Severity Severity
-	Script   string   // script name ("" for file-level)
+	Script   string // script name ("" for file-level)
 	Message  string
-	Line     int      // 1-based line number in the decompiled output (0 = unknown)
+	Line     int // 1-based line number in the decompiled output (0 = unknown)
 }
 
 func (d Diagnostic) String() string {
@@ -72,10 +72,10 @@ type scriptCall struct {
 
 // FileInfo holds analysis data for the entire COB file.
 type FileInfo struct {
-	COB              *scripting.COB
-	Scripts          []ScriptInfo
-	ScriptNames      map[string]bool
-	IsDecompiled     bool           // true when linting decompiled COB output (not raw BOS)
+	COB          *scripting.COB
+	Scripts      []ScriptInfo
+	ScriptNames  map[string]bool
+	IsDecompiled bool // true when linting decompiled COB output (not raw BOS)
 	// Line mappings from decompiled output.
 	PieceDeclLine    int            // line of "piece ..." declaration
 	StaticDeclLine   int            // line of "static-var ..." declaration
@@ -102,11 +102,11 @@ type decompiledHit struct {
 
 // CallGraphEdge represents a relationship between functions/signals.
 type CallGraphEdge struct {
-	From     string `json:"from"`
-	To       string `json:"to"`
-	Type     string `json:"type"` // "call", "start", "signal", "set-mask"
-	Line     int    `json:"line"`
-	Script   string `json:"script"`
+	From   string `json:"from"`
+	To     string `json:"to"`
+	Type   string `json:"type"` // "call", "start", "signal", "set-mask"
+	Line   int    `json:"line"`
+	Script string `json:"script"`
 }
 
 // CallGraphNode represents a function or signal in the call graph.

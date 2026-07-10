@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/coreprime/kbot/formats/hpi/common"
+	"github.com/coreprime/kbot-io/formats/hpi/common"
 )
 
 // TestWriteReadRoundTrip writes a small archive with both compressed and raw

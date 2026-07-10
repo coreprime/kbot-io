@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/coreprime/kbot/formats/scripting"
+	"github.com/coreprime/kbot-io/formats/scripting"
 )
 
 // Format controls the output style of disassembly.
@@ -110,22 +110,22 @@ func (dv *Disassembler) renderPlain() string {
 // renderAnnotated produces the rich view with box-drawing, flow arrows, and hex opcodes.
 func (dv *Disassembler) renderAnnotated() string {
 	var sb strings.Builder
-	
+
 	// Script directive + decorated header
 	fmt.Fprintf(&sb, ".script %s\n", dv.name)
 	sb.WriteString("╔════════════════════════════════════════════════════════════════════\n")
-	
+
 	// Analyze all jumps
 	jumps := dv.analyzeJumps()
-	
+
 	// Build jump visualization map
 	flowChars := dv.buildFlowChars(jumps)
-	
+
 	// Render each instruction with flow control visualization
 	for i, inst := range dv.instructions {
 		// Get flow control characters for this line
 		flowPrefix := flowChars[i]
-		
+
 		// Format instruction
 		opname := scripting.OpcodeName(inst.Opcode)
 		paramCount := scripting.OpcodeParamCount(inst.Opcode)
@@ -138,7 +138,7 @@ func (dv *Disassembler) renderAnnotated() string {
 		default:
 			instrLine = fmt.Sprintf("%04X: %s", inst.Offset, opname)
 		}
-		
+
 		// Add jump annotation if this is a jump
 		if inst.Opcode == scripting.OP_JUMP || inst.Opcode == scripting.OP_JUMP_IF_FALSE {
 			target := uint32(inst.Operand) * 4
@@ -148,28 +148,28 @@ func (dv *Disassembler) renderAnnotated() string {
 			}
 			instrLine += fmt.Sprintf("  %s 0x%04X", jumpType, target)
 		}
-		
+
 		// Add hex representation
 		instrLine += fmt.Sprintf("  (0x%08X)", inst.Opcode)
-		
+
 		// Combine flow prefix and instruction
 		fmt.Fprintf(&sb, "║ %s %s\n", flowPrefix, instrLine)
 	}
-	
+
 	sb.WriteString("╚════════════════════════════════════════════════════════════════════\n")
-	
+
 	return sb.String()
 }
 
 // analyzeJumps finds all jump instructions and their targets
 func (dv *Disassembler) analyzeJumps() []jumpInfo {
 	var jumps []jumpInfo
-	
+
 	for i, inst := range dv.instructions {
 		if inst.Opcode == scripting.OP_JUMP || inst.Opcode == scripting.OP_JUMP_IF_FALSE {
 			targetOffset := uint32(inst.Operand) * 4
 			targetIdx := dv.findInstructionIndex(targetOffset)
-			
+
 			if targetIdx != -1 {
 				jumps = append(jumps, jumpInfo{
 					fromIdx:    i,
@@ -182,29 +182,29 @@ func (dv *Disassembler) analyzeJumps() []jumpInfo {
 			}
 		}
 	}
-	
+
 	return jumps
 }
 
 // buildFlowChars creates flow control visualization for each line
 func (dv *Disassembler) buildFlowChars(jumps []jumpInfo) []string {
 	flowChars := make([]string, len(dv.instructions))
-	
+
 	// Initialize all lines with base spacing
 	for i := range flowChars {
 		flowChars[i] = "      " // 6 chars for flow control
 	}
-	
+
 	// Draw jump arrows
 	for jumpIdx, jump := range jumps {
 		column := jumpIdx % 3 // Use columns 0, 1, 2 for different jumps
-		
+
 		if jump.isBackward {
 			// Backward jump (while loop)
 			// Draw from jump back to target
 			for i := jump.toIdx; i <= jump.fromIdx; i++ {
 				chars := []rune(flowChars[i])
-				
+
 				switch i {
 				case jump.toIdx:
 					// Top of loop
@@ -217,7 +217,7 @@ func (dv *Disassembler) buildFlowChars(jumps []jumpInfo) []string {
 					// Middle of loop
 					chars[column*2] = '│'
 				}
-				
+
 				flowChars[i] = string(chars)
 			}
 		} else {
@@ -225,10 +225,10 @@ func (dv *Disassembler) buildFlowChars(jumps []jumpInfo) []string {
 			// Draw from jump to target
 			minIdx := jump.fromIdx
 			maxIdx := jump.toIdx
-			
+
 			for i := minIdx; i <= maxIdx && i < len(flowChars); i++ {
 				chars := []rune(flowChars[i])
-				
+
 				if i == jump.fromIdx {
 					// Jump instruction
 					if jump.opcode == scripting.OP_JUMP_IF_FALSE {
@@ -244,12 +244,12 @@ func (dv *Disassembler) buildFlowChars(jumps []jumpInfo) []string {
 					// Middle
 					chars[column*2] = '│'
 				}
-				
+
 				flowChars[i] = string(chars)
 			}
 		}
 	}
-	
+
 	return flowChars
 }
 

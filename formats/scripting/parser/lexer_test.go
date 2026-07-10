@@ -74,7 +74,7 @@ sleep 150;`
 		if tok.Type == TOKEN_EOF {
 			break
 		}
-		
+
 		// Check if it's one of our expected keywords
 		for _, expected := range expectedKeywords {
 			if tok.Type == expected {
@@ -96,7 +96,7 @@ piece base; /* block
 comment */ static-var x;`
 
 	l := NewLexer(input, true)
-	
+
 	var tokens []Token
 	for {
 		tok := l.NextToken()
@@ -132,7 +132,7 @@ func TestLexerNumbers(t *testing.T) {
 	for _, tt := range tests {
 		l := NewLexer(tt.input, false)
 		tok := l.NextToken()
-		
+
 		if tok.Type != TOKEN_NUMBER {
 			t.Errorf("Expected NUMBER token, got %s", tok.Type)
 		}
@@ -152,7 +152,7 @@ func TestLexerOperators(t *testing.T) {
 	}
 
 	l := NewLexer(input, false)
-	
+
 	for i, expectedType := range expected {
 		tok := l.NextToken()
 		if tok.Type != expectedType {
@@ -216,7 +216,7 @@ func TestLexerPreserveWhitespace(t *testing.T) {
 
 	// Without preserving whitespace
 	tokens1 := TokensNoWS(input)
-	
+
 	// Should be: x, =, 5, EOF
 	if len(tokens1) != 4 {
 		t.Errorf("Without WS: expected 4 tokens, got %d", len(tokens1))
@@ -257,11 +257,11 @@ func TestLexerHyphenatedKeywords(t *testing.T) {
 	for _, keyword := range hyphenated {
 		l := NewLexer(keyword, false)
 		tok := l.NextToken()
-		
+
 		if tok.Literal != keyword {
 			t.Errorf("Literal mismatch: expected %q, got %q", keyword, tok.Literal)
 		}
-		
+
 		if tok.Type == TOKEN_IDENT {
 			t.Errorf("Keyword %q not recognized, got IDENT", keyword)
 		}

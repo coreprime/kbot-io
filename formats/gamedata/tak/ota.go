@@ -1,6 +1,6 @@
 package tak
 
-import "github.com/coreprime/kbot/formats/gamedata/common"
+import "github.com/coreprime/kbot-io/formats/gamedata/common"
 
 // Map wraps a TA:Kingdoms mission/map .ota file, whose sole top-level section
 // is [GlobalHeader]. Decode a file with

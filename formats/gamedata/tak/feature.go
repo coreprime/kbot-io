@@ -1,6 +1,6 @@
 package tak
 
-import "github.com/coreprime/kbot/formats/gamedata/common"
+import "github.com/coreprime/kbot-io/formats/gamedata/common"
 
 // Feature is one entry of a TA:Kingdoms features/*.tdf file. Each feature is a
 // top-level [SECTION]; decode a file with

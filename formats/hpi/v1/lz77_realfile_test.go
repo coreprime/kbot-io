@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/coreprime/kbot/formats/hpi/common"
+	"github.com/coreprime/kbot-io/formats/hpi/common"
 )
 
 // TestLZ77RoundTripRealFile pulls a real decompressed GAF payload out of a

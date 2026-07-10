@@ -32,13 +32,13 @@ type HeightData struct {
 
 // Section is a parsed SCT file.
 type Section struct {
-	Header     Header
-	Tiles      [][]byte     // NumTiles entries, each 1024 bytes (32×32 palette indices)
-	TileMap    []int16      // Width×Height tile indices into Tiles
-	HeightMap  []HeightData // (Width*2)×(Height*2) height samples at 16px resolution
-	AttrW      int          // Width * 2 (attribute grid width)
-	AttrH      int          // Height * 2 (attribute grid height)
-	Minimap    []byte       // 128×128 palette indices
+	Header    Header
+	Tiles     [][]byte     // NumTiles entries, each 1024 bytes (32×32 palette indices)
+	TileMap   []int16      // Width×Height tile indices into Tiles
+	HeightMap []HeightData // (Width*2)×(Height*2) height samples at 16px resolution
+	AttrW     int          // Width * 2 (attribute grid width)
+	AttrH     int          // Height * 2 (attribute grid height)
+	Minimap   []byte       // 128×128 palette indices
 }
 
 // LoadFromReader parses an SCT file from the given reader.

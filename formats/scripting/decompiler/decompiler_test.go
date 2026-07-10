@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coreprime/kbot/formats/scripting"
-	"github.com/coreprime/kbot/formats/scripting/assembly"
-	"github.com/coreprime/kbot/internal/testutil"
+	"github.com/coreprime/kbot-io/formats/scripting"
+	"github.com/coreprime/kbot-io/formats/scripting/assembly"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
 func TestDecompiler_BasicOutput(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coreprime/kbot/internal/testutil"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
 // collectFiles walks dir and returns every path with the given lowercase

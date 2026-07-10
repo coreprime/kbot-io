@@ -16,24 +16,24 @@ const (
 
 // Header represents a Smacker video file header
 type Header struct {
-	Signature     uint32 // Should be "SMK2" or "SMK4"
-	Width         uint32
-	Height        uint32
-	Frames        uint32
-	FrameRate     int32 // Microseconds per frame (negative = frames per second)
-	Flags         uint32
-	AudioSize     [7]uint32
-	TreesSize     uint32
-	MMapSize      uint32
-	MClrSize      uint32
-	FullSize      uint32
-	TypeSize      uint32
-	AudioRate     [7]uint32
-	AudioFlags    [7]uint32 // Lower 2 bytes: format, upper: channels
-	FrameSizes    []uint32  // Array of frame sizes
-	FrameTypes    []byte    // Array of frame types
-	HuffmanTrees  []byte    // Huffman trees data
-	RingFrame     uint32
+	Signature    uint32 // Should be "SMK2" or "SMK4"
+	Width        uint32
+	Height       uint32
+	Frames       uint32
+	FrameRate    int32 // Microseconds per frame (negative = frames per second)
+	Flags        uint32
+	AudioSize    [7]uint32
+	TreesSize    uint32
+	MMapSize     uint32
+	MClrSize     uint32
+	FullSize     uint32
+	TypeSize     uint32
+	AudioRate    [7]uint32
+	AudioFlags   [7]uint32 // Lower 2 bytes: format, upper: channels
+	FrameSizes   []uint32  // Array of frame sizes
+	FrameTypes   []byte    // Array of frame types
+	HuffmanTrees []byte    // Huffman trees data
+	RingFrame    uint32
 }
 
 // Reader wraps a Smacker video file for reading
@@ -101,7 +101,7 @@ func (r *Reader) FrameRate() float64 {
 	if r.header.FrameRate == 0 {
 		return 15.0 // Default fallback
 	}
-	
+
 	// Positive means microseconds per frame
 	return 1000000.0 / float64(r.header.FrameRate)
 }

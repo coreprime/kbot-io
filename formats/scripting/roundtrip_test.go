@@ -9,17 +9,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coreprime/kbot/formats/scripting"
-	"github.com/coreprime/kbot/formats/scripting/compiler"
-	"github.com/coreprime/kbot/formats/scripting/decompiler"
-	"github.com/coreprime/kbot/internal/testutil"
+	"github.com/coreprime/kbot-io/formats/scripting"
+	"github.com/coreprime/kbot-io/formats/scripting/compiler"
+	"github.com/coreprime/kbot-io/formats/scripting/decompiler"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
 // TestCOBDecompileRoundTrip tests the full decompile → compile → compare cycle
 func TestCOBDecompileRoundTrip(t *testing.T) {
 	testCases := []struct {
-		name     string
-		cobFile  string
+		name    string
+		cobFile string
 	}{
 		{
 			name:    "armaap",
@@ -130,7 +130,7 @@ func TestCOBDecompileRoundTrip(t *testing.T) {
 			// PHASE 7: Detailed bytecode comparison
 			// =============================================================
 			t.Log("Phase 7: Comparing bytecode...")
-			
+
 			originalBytes, _ := os.ReadFile(originalPath)
 			recompiledBytes, _ := os.ReadFile(recompiledPath)
 
@@ -151,8 +151,8 @@ func TestCOBDecompileRoundTrip(t *testing.T) {
 				t.Logf("📊 Bytecode differs:")
 				t.Logf("   Original:    %d bytes", len(originalBytes))
 				t.Logf("   Recompiled:  %d bytes", len(recompiledBytes))
-				t.Logf("   Difference:  %+d bytes (%.1f%%)", 
-					sizeDiff, 
+				t.Logf("   Difference:  %+d bytes (%.1f%%)",
+					sizeDiff,
 					float64(sizeDiff)/float64(len(originalBytes))*100)
 			}
 		})
@@ -162,7 +162,7 @@ func TestCOBDecompileRoundTrip(t *testing.T) {
 // generateMetadata creates a detailed metadata report
 func generateMetadata(cob *scripting.COB) string {
 	var buf bytes.Buffer
-	
+
 	fmt.Fprintf(&buf, "COB File Metadata\n")
 	fmt.Fprintf(&buf, "=================\n\n")
 	fmt.Fprintf(&buf, "Version:          %d\n", cob.VersionSignature)
@@ -173,31 +173,31 @@ func generateMetadata(cob *scripting.COB) string {
 	fmt.Fprintf(&buf, "NumberOfStaticVars: %d\n", cob.NumberOfStaticVars)
 	fmt.Fprintf(&buf, "UKZero:             %d\n", cob.UKZero)
 	fmt.Fprintf(&buf, "OffsetToNameArray:  %d\n\n", cob.OffsetToNameArray)
-	
+
 	fmt.Fprintf(&buf, "Script Names (%d):\n", len(cob.ScriptNames))
 	for i, name := range cob.ScriptNames {
 		fmt.Fprintf(&buf, "  [%2d] %s\n", i, name)
 	}
-	
+
 	fmt.Fprintf(&buf, "\nPiece Names (%d):\n", len(cob.PieceNames))
 	for i, name := range cob.PieceNames {
 		fmt.Fprintf(&buf, "  [%2d] %s\n", i, name)
 	}
-	
+
 	return buf.String()
 }
 
 // analyzeDecompiledOutput performs simple analysis
 func analyzeDecompiledOutput(bos string, cob *scripting.COB) []byte {
 	lines := strings.Split(bos, "\n")
-	
+
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "Decompiled BOS Analysis\n")
 	fmt.Fprintf(&buf, "=======================\n\n")
 	fmt.Fprintf(&buf, "Total lines:      %d\n", len(lines))
 	fmt.Fprintf(&buf, "Original scripts: %d\n", cob.NumScripts)
 	fmt.Fprintf(&buf, "Original pieces:  %d\n\n", cob.NumPieces)
-	
+
 	// Count functions
 	funcCount := 0
 	for _, line := range lines {
@@ -206,23 +206,23 @@ func analyzeDecompiledOutput(bos string, cob *scripting.COB) []byte {
 		}
 	}
 	fmt.Fprintf(&buf, "Functions found:  %d\n", funcCount)
-	
+
 	return buf.Bytes()
 }
 
 // generateDetailedDiff creates a comprehensive diff report
 func generateDetailedDiff(origCOB, recompCOB *scripting.COB, origBytes, recompBytes []byte) string {
 	var buf bytes.Buffer
-	
+
 	fmt.Fprintf(&buf, "Detailed Bytecode Comparison\n")
 	fmt.Fprintf(&buf, "============================\n\n")
-	
+
 	// Header comparison
 	fmt.Fprintf(&buf, "HEADER COMPARISON\n")
 	fmt.Fprintf(&buf, "=================\n\n")
 	fmt.Fprintf(&buf, "Field                    Original        Recompiled      Match\n")
 	fmt.Fprintf(&buf, "----------------------   -------------   -------------   -----\n")
-	
+
 	compareField := func(name string, orig, recomp uint32) {
 		match := "✓"
 		if orig != recomp {
@@ -230,60 +230,60 @@ func generateDetailedDiff(origCOB, recompCOB *scripting.COB, origBytes, recompBy
 		}
 		fmt.Fprintf(&buf, "%-24s %-15d %-15d %s\n", name, orig, recomp, match)
 	}
-	
+
 	compareField("VersionSignature", origCOB.VersionSignature, recompCOB.VersionSignature)
 	compareField("NumScripts", origCOB.NumScripts, recompCOB.NumScripts)
 	compareField("NumPieces", origCOB.NumPieces, recompCOB.NumPieces)
 	compareField("LengthOfScripts", origCOB.LengthOfScripts, recompCOB.LengthOfScripts)
 	compareField("Code offset", origCOB.OffsetToScriptCode, recompCOB.OffsetToScriptCode)
 	compareField("Code size", uint32(len(origCOB.Code)), uint32(len(recompCOB.Code)))
-	
+
 	fmt.Fprintf(&buf, "\n")
-	
+
 	// Script-by-script comparison
 	fmt.Fprintf(&buf, "SCRIPT-BY-SCRIPT COMPARISON\n")
 	fmt.Fprintf(&buf, "===========================\n\n")
-	
+
 	numScripts := int(origCOB.NumScripts)
 	if int(recompCOB.NumScripts) < numScripts {
 		numScripts = int(recompCOB.NumScripts)
 	}
-	
+
 	for i := 0; i < numScripts; i++ {
 		scriptName := "unknown"
 		if i < len(origCOB.ScriptNames) && origCOB.ScriptNames[i] != "" {
 			scriptName = origCOB.ScriptNames[i]
 		}
-		
+
 		fmt.Fprintf(&buf, "Script %d: %s\n", i, scriptName)
 		fmt.Fprintf(&buf, "%s\n", strings.Repeat("-", 60))
-		
+
 		// Disassemble both versions
 		origInst, _ := origCOB.Disassemble(i)
 		recompInst, _ := recompCOB.Disassemble(i)
-		
+
 		fmt.Fprintf(&buf, "Original:    %d instructions\n", len(origInst))
 		fmt.Fprintf(&buf, "Recompiled:  %d instructions\n", len(recompInst))
-		
+
 		// Find first difference
 		minLen := len(origInst)
 		if len(recompInst) < minLen {
 			minLen = len(recompInst)
 		}
-		
+
 		firstDiff := -1
 		for j := 0; j < minLen; j++ {
 			if origInst[j].Opcode != recompInst[j].Opcode ||
-			   origInst[j].Operand != recompInst[j].Operand ||
-			   origInst[j].Operand2 != recompInst[j].Operand2 {
+				origInst[j].Operand != recompInst[j].Operand ||
+				origInst[j].Operand2 != recompInst[j].Operand2 {
 				firstDiff = j
 				break
 			}
 		}
-		
+
 		if firstDiff >= 0 {
 			fmt.Fprintf(&buf, "First diff:  Instruction %d\n\n", firstDiff)
-			
+
 			// Show context around diff
 			start := firstDiff - 2
 			if start < 0 {
@@ -293,31 +293,31 @@ func generateDetailedDiff(origCOB, recompCOB *scripting.COB, origBytes, recompBy
 			if end > minLen {
 				end = minLen
 			}
-			
+
 			fmt.Fprintf(&buf, "Context (instructions %d-%d):\n", start, end-1)
 			fmt.Fprintf(&buf, "  Orig  | Recomp | Opcode           Operand     Operand2\n")
 			fmt.Fprintf(&buf, "  ------|--------|------------------------------------------\n")
-			
+
 			for j := start; j < end; j++ {
 				marker := "  "
 				if j == firstDiff {
 					marker = "→ "
 				}
-				
+
 				orig := origInst[j]
 				recomp := recompInst[j]
-				
+
 				origOp := scripting.OpcodeName(orig.Opcode)
 				recompOp := scripting.OpcodeName(recomp.Opcode)
-				
+
 				match := "✓"
 				if orig.Opcode != recomp.Opcode || orig.Operand != recomp.Operand {
 					match = "✗"
 				}
-				
+
 				fmt.Fprintf(&buf, "%s[%3d]  | [%3d]  | %-16s %10d  %10d\n",
 					marker, j, j, origOp, orig.Operand, orig.Operand2)
-				
+
 				if j == firstDiff && match == "✗" {
 					fmt.Fprintf(&buf, "        |        | %-16s %10d  %10d ← recompiled\n",
 						recompOp, recomp.Operand, recomp.Operand2)
@@ -328,17 +328,17 @@ func generateDetailedDiff(origCOB, recompCOB *scripting.COB, origBytes, recompBy
 		} else {
 			fmt.Fprintf(&buf, "Instruction count differs at position %d\n", minLen)
 		}
-		
+
 		fmt.Fprintf(&buf, "\n")
 	}
-	
+
 	// Overall size comparison
 	fmt.Fprintf(&buf, "OVERALL SIZE COMPARISON\n")
 	fmt.Fprintf(&buf, "=======================\n\n")
 	fmt.Fprintf(&buf, "Original:    %d bytes\n", len(origBytes))
 	fmt.Fprintf(&buf, "Recompiled:  %d bytes\n", len(recompBytes))
 	fmt.Fprintf(&buf, "Difference:  %+d bytes\n", len(recompBytes)-len(origBytes))
-	
+
 	return buf.String()
 }
 

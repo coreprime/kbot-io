@@ -1,5 +1,5 @@
 // Package tak provides typed Go representations of Total Annihilation: Kingdoms
-// game-data files, built on the github.com/coreprime/kbot/formats/tdf codec.
+// game-data files, built on the github.com/coreprime/kbot-io/formats/tdf codec.
 //
 // TA:Kingdoms uses the same TDF text grammar as Total Annihilation but a
 // different schema: a unit .fbi file is a document of sibling top-level
@@ -10,7 +10,7 @@
 // common package.
 package tak
 
-import "github.com/coreprime/kbot/formats/gamedata/common"
+import "github.com/coreprime/kbot-io/formats/gamedata/common"
 
 // UnitInfo is the [UNITINFO] section of a TA:Kingdoms unit .fbi file. Fields
 // shared with Total Annihilation live on the embedded common.UnitInfoBase; the

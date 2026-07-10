@@ -12,7 +12,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/coreprime/kbot/formats/hpi/common"
+	"github.com/coreprime/kbot-io/formats/hpi/common"
 )
 
 // v2-specific structure sizes (each field is a 32-bit little-endian int).

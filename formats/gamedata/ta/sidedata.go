@@ -1,6 +1,6 @@
 package ta
 
-import "github.com/coreprime/kbot/formats/gamedata/common"
+import "github.com/coreprime/kbot-io/formats/gamedata/common"
 
 // Side is a [SIDEn] section of gamedata/sidedata.tdf: the on-screen HUD layout
 // and identity of one playable side (ARM, CORE). The many [LOGO], [ENERGYBAR],

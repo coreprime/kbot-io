@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coreprime/kbot/internal/testutil"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
 // TestLoadStub checks an empty multiplayer scenario: no units, nine empty

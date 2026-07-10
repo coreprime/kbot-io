@@ -1,6 +1,6 @@
 package tak
 
-import "github.com/coreprime/kbot/formats/gamedata/common"
+import "github.com/coreprime/kbot-io/formats/gamedata/common"
 
 // Effect is a top-level particle-effect class from gamedata/effects/effects.tdf
 // (e.g. [lightning], [fire]): the canvas size, particle budget and animation

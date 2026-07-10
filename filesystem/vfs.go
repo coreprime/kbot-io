@@ -49,7 +49,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/coreprime/kbot/formats/hpi"
+	"github.com/coreprime/kbot-io/formats/hpi"
 )
 
 // Config configures the virtual filesystem

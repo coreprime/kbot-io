@@ -1,4 +1,4 @@
-package assets
+package palettes
 
 import (
 	_ "embed"

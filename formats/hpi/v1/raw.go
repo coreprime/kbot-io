@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/coreprime/kbot/formats/hpi/common"
+	"github.com/coreprime/kbot-io/formats/hpi/common"
 )
 
 // ReadRawFileData returns the raw on-disk bytes for a compressed file entry:

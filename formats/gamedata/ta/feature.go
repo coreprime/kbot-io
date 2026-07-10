@@ -1,6 +1,6 @@
 package ta
 
-import "github.com/coreprime/kbot/formats/gamedata/common"
+import "github.com/coreprime/kbot-io/formats/gamedata/common"
 
 // Feature is one entry of a features/*.tdf file. Each feature is a top-level
 // [SECTION]; decode a file with

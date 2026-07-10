@@ -31,10 +31,10 @@ func TestEffectiveTransparencyTAKCornerOverride(t *testing.T) {
 	for i := range pixels {
 		pixels[i] = 0xE8 // unit body
 	}
-	pixels[0] = 5            // TL
-	pixels[w-1] = 5          // TR
-	pixels[(h-1)*w] = 5      // BL
-	pixels[h*w-1] = 5        // BR
+	pixels[0] = 5       // TL
+	pixels[w-1] = 5     // TR
+	pixels[(h-1)*w] = 5 // BL
+	pixels[h*w-1] = 5   // BR
 	f := makeFrame(w, h, 9, pixels)
 	if got := f.EffectiveTransparencyIndex(); got != 5 {
 		t.Errorf("got %d, want 5 (corner override)", got)

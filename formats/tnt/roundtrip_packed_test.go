@@ -12,10 +12,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coreprime/kbot/filesystem"
-	"github.com/coreprime/kbot/formats/gaf"
-	"github.com/coreprime/kbot/internal/assets"
-	"github.com/coreprime/kbot/internal/testutil"
+	"github.com/coreprime/kbot-io/filesystem"
+	"github.com/coreprime/kbot-io/formats/gaf"
+	"github.com/coreprime/kbot-io/palettes"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
 // packedTNTRoundTripSamples is a hand-picked sample covering the shapes of
@@ -143,7 +143,7 @@ func readVFSFile(vfs *filesystem.VirtualFileSystem, path string) ([]byte, error)
 
 // loadDefaultPalette returns the embedded TA palette in color.Palette form.
 func loadDefaultPalette() (color.Palette, error) {
-	p, err := gaf.LoadPaletteFromBytes(assets.DefaultPalette)
+	p, err := gaf.LoadPaletteFromBytes(palettes.DefaultPalette)
 	if err != nil {
 		return nil, err
 	}

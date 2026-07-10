@@ -3,7 +3,7 @@ package compiler
 import (
 	"testing"
 
-	"github.com/coreprime/kbot/formats/scripting"
+	"github.com/coreprime/kbot-io/formats/scripting"
 )
 
 func TestCompileTAKIntrinsicsRoundTrip(t *testing.T) {

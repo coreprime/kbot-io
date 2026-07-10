@@ -11,7 +11,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/coreprime/kbot/formats/tnt/tak"
+	"github.com/coreprime/kbot-io/formats/tnt/tak"
 )
 
 // TNT IDVersion words. TA writes 0x2000; TA: Kingdoms reuses the TNT

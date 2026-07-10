@@ -75,7 +75,7 @@ func LoadPaletteFromBytes(data []byte) (*Palette, error) {
 	if len(data) != 1024 {
 		return nil, fmt.Errorf("invalid palette size: expected 1024 bytes, got %d", len(data))
 	}
-	
+
 	p := &Palette{}
 	for i := 0; i < 256; i++ {
 		offset := i * 4
@@ -86,11 +86,9 @@ func LoadPaletteFromBytes(data []byte) (*Palette, error) {
 			A: 255, // TA palettes don't use alpha, always opaque
 		}
 	}
-	
+
 	// Make color 0 transparent
 	p.Colors[0].A = 0
-	
+
 	return p, nil
 }
-
-

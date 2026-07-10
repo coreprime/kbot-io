@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/coreprime/kbot/formats/tnt/tak"
+	"github.com/coreprime/kbot-io/formats/tnt/tak"
 )
 
 // HeaderSize is the on-disk size of the TNT header in bytes.

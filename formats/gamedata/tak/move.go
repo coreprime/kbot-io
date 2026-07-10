@@ -1,6 +1,6 @@
 package tak
 
-import "github.com/coreprime/kbot/formats/gamedata/common"
+import "github.com/coreprime/kbot-io/formats/gamedata/common"
 
 // MovementClass is one [CLASSn] section of gamedata/moveinfo.tdf. Decode the
 // whole file with

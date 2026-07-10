@@ -1,19 +1,19 @@
 package scripting_test
 
 import (
+	"github.com/coreprime/kbot-io/testutil"
 	"os"
-	"github.com/coreprime/kbot/internal/testutil"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/coreprime/kbot/filesystem"
-	"github.com/coreprime/kbot/formats/scripting/parser"
+	"github.com/coreprime/kbot-io/filesystem"
+	"github.com/coreprime/kbot-io/formats/scripting/parser"
 )
 
 func TestEndToEndBOSProcessing(t *testing.T) {
 	t.Skip("Integration test - parser has known issues with complex BOS files")
-	
+
 	// Test with a real BOS file
 	path := testutil.UnpackedFile(t, "scripts", "cormstor.bos")
 	// Step 1: Preprocess
@@ -23,7 +23,7 @@ func TestEndToEndBOSProcessing(t *testing.T) {
 		t.Fatalf("Failed to create filesystem: %v", err)
 	}
 	defer func() { _ = fs.Close() }()
-	
+
 	prep := parser.NewPreprocessor(fs)
 	preprocessed, err := prep.Process("cormstor.bos")
 	if err != nil {
@@ -35,17 +35,17 @@ func TestEndToEndBOSProcessing(t *testing.T) {
 	// Step 2: Lex
 	lexer := parser.NewLexer(preprocessed, false)
 	tokens := lexer.AllTokens()
-	
+
 	if len(tokens) == 0 {
 		t.Fatal("No tokens produced")
 	}
-	
+
 	t.Logf("Lexed %d tokens", len(tokens))
 
 	// Step 3: Parse
 	p := parser.NewParser(preprocessed)
 	program := p.ParseProgram()
-	
+
 	if len(p.Errors()) > 0 {
 		t.Logf("Parser errors:")
 		for _, err := range p.Errors() {
@@ -95,7 +95,7 @@ func TestEndToEndBOSProcessing(t *testing.T) {
 
 func TestParseAllBOSFiles(t *testing.T) {
 	t.Skip("Integration test - parser has known issues with complex BOS files")
-	
+
 	scriptsDir := testutil.UnpackedDir(t, "scripts")
 	if _, err := os.Stat(scriptsDir); os.IsNotExist(err) {
 		t.Skip("Scripts directory not found")

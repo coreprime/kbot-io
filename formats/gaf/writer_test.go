@@ -14,7 +14,7 @@ func TestWriteReadRoundtrip(t *testing.T) {
 				Width: 4, Height: 3,
 				OriginX: 0, OriginY: 0,
 				TransparencyIndex: 9,
-				Duration: 10,
+				Duration:          10,
 				Pixels: []byte{
 					9, 9, 1, 2,
 					3, 3, 3, 9,

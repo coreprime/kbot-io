@@ -1,6 +1,6 @@
 package ta
 
-import "github.com/coreprime/kbot/formats/gamedata/common"
+import "github.com/coreprime/kbot-io/formats/gamedata/common"
 
 // UnitInfo is the [UNITINFO] section of a unit's .fbi file. Decode a single
 // file with

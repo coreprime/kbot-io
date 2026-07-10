@@ -281,4 +281,3 @@ func (p *Palette) Equals(other *Palette) bool {
 	}
 	return true
 }
-

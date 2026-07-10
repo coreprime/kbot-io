@@ -1,6 +1,6 @@
 package tak
 
-import "github.com/coreprime/kbot/formats/gamedata/common"
+import "github.com/coreprime/kbot-io/formats/gamedata/common"
 
 // Side is a [SIDEn] section of gamedata/sidedata.tdf: the identity, art and
 // audio of one playable kingdom (Aramon, Veruna, Taros, Zhon, Creon). Fields

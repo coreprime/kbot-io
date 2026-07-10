@@ -6,14 +6,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coreprime/kbot/filesystem"
-	"github.com/coreprime/kbot/internal/testutil"
+	"github.com/coreprime/kbot-io/filesystem"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
 func TestPreprocessorDefine(t *testing.T) {
 	fs := filesystem.NewMemoryFileSystem()
 	p := NewPreprocessor(fs)
-	
+
 	input := `#define SIG_AIM 2
 #define SMOKEPIECE1 base
 signal SIG_AIM;
@@ -35,7 +35,7 @@ emit-sfx from SMOKEPIECE1;`
 func TestPreprocessorIfdef(t *testing.T) {
 	fs := filesystem.NewMemoryFileSystem()
 	p := NewPreprocessor(fs)
-	
+
 	input := `#define SMOKEPIECE3 1
 #ifdef SMOKEPIECE4
 line1
@@ -65,7 +65,7 @@ line3
 func TestPreprocessorIfndef(t *testing.T) {
 	fs := filesystem.NewMemoryFileSystem()
 	p := NewPreprocessor(fs)
-	
+
 	input := `#ifndef SMOKE_H_
 #define SMOKE_H_
 content here
@@ -84,7 +84,7 @@ content here
 func TestPreprocessorUndef(t *testing.T) {
 	fs := filesystem.NewMemoryFileSystem()
 	p := NewPreprocessor(fs)
-	
+
 	input := `#define NUM_SMOKE_PIECES 4
 before NUM_SMOKE_PIECES
 #undef NUM_SMOKE_PIECES
@@ -111,7 +111,7 @@ after NUM_SMOKE_PIECES`
 func TestPreprocessorInclude(t *testing.T) {
 	// Create temp files for testing
 	tmpDir := t.TempDir()
-	
+
 	// Create header file
 	headerPath := filepath.Join(tmpDir, "test.h")
 	headerContent := `#ifndef TEST_H
@@ -136,7 +136,7 @@ result = VALUE;`
 		t.Fatalf("Failed to create filesystem: %v", err)
 	}
 	defer func() { _ = fs.Close() }()
-	
+
 	p := NewPreprocessor(fs)
 	result, err := p.Process("main.bos")
 	if err != nil {
@@ -155,9 +155,9 @@ func TestPreprocessorRealFile(t *testing.T) {
 		t.Fatalf("Failed to create filesystem: %v", err)
 	}
 	defer func() { _ = fs.Close() }()
-	
+
 	p := NewPreprocessor(fs)
-	
+
 	result, err := p.Process("cormstor.bos")
 	if err != nil {
 		t.Fatalf("Process failed: %v", err)
@@ -167,12 +167,12 @@ func TestPreprocessorRealFile(t *testing.T) {
 	if !strings.Contains(result, "SmokeUnit()") {
 		t.Errorf("Expected SmokeUnit() function from smokeunit.h")
 	}
-	
+
 	// Should have expanded defines
 	if strings.Contains(result, "SMOKEPIECE1") {
 		t.Errorf("SMOKEPIECE1 should be expanded to 'base'")
 	}
-	
+
 	// Should have actual function
 	if !strings.Contains(result, "Create()") {
 		t.Errorf("Expected Create() function")

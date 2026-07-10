@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coreprime/kbot/internal/assets"
-	"github.com/coreprime/kbot/internal/testutil"
+	"github.com/coreprime/kbot-io/palettes"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
 func TestLoadEmbeddedPalette(t *testing.T) {
-	p, err := LoadFromBytes(assets.DefaultPalette)
+	p, err := LoadFromBytes(palettes.DefaultPalette)
 	if err != nil {
 		t.Fatalf("LoadFromBytes failed: %v", err)
 	}
@@ -29,7 +29,7 @@ func TestLoadEmbeddedPalette(t *testing.T) {
 }
 
 func TestRoundTripBytes(t *testing.T) {
-	p, err := LoadFromBytes(assets.DefaultPalette)
+	p, err := LoadFromBytes(palettes.DefaultPalette)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -37,13 +37,13 @@ func TestRoundTripBytes(t *testing.T) {
 	if err := p.Write(&buf); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if !bytes.Equal(buf.Bytes(), assets.DefaultPalette) {
+	if !bytes.Equal(buf.Bytes(), palettes.DefaultPalette) {
 		t.Error("round-trip changed bytes")
 	}
 }
 
 func TestWriteJASC(t *testing.T) {
-	p, _ := LoadFromBytes(assets.DefaultPalette)
+	p, _ := LoadFromBytes(palettes.DefaultPalette)
 	var buf bytes.Buffer
 	if err := p.WriteJASC(&buf); err != nil {
 		t.Fatalf("jasc: %v", err)
@@ -58,7 +58,7 @@ func TestWriteJASC(t *testing.T) {
 }
 
 func TestWriteGPL(t *testing.T) {
-	p, _ := LoadFromBytes(assets.DefaultPalette)
+	p, _ := LoadFromBytes(palettes.DefaultPalette)
 	var buf bytes.Buffer
 	if err := p.WriteGPL(&buf, "Test"); err != nil {
 		t.Fatalf("gpl: %v", err)
@@ -70,7 +70,7 @@ func TestWriteGPL(t *testing.T) {
 }
 
 func TestRenderSwatch(t *testing.T) {
-	p, _ := LoadFromBytes(assets.DefaultPalette)
+	p, _ := LoadFromBytes(palettes.DefaultPalette)
 	img := p.RenderSwatch(8)
 	if img.Bounds().Dx() != 128 || img.Bounds().Dy() != 128 {
 		t.Errorf("expected 128x128, got %dx%d", img.Bounds().Dx(), img.Bounds().Dy())
@@ -91,7 +91,7 @@ func TestRejectsWrongSize(t *testing.T) {
 }
 
 func TestColorModel(t *testing.T) {
-	p, _ := LoadFromBytes(assets.DefaultPalette)
+	p, _ := LoadFromBytes(palettes.DefaultPalette)
 	cm := p.ColorModel()
 	if len(cm) != EntryCount {
 		t.Errorf("ColorModel size = %d, want %d", len(cm), EntryCount)
@@ -102,8 +102,8 @@ func TestColorModel(t *testing.T) {
 }
 
 func TestEquals(t *testing.T) {
-	a, _ := LoadFromBytes(assets.DefaultPalette)
-	b, _ := LoadFromBytes(assets.DefaultPalette)
+	a, _ := LoadFromBytes(palettes.DefaultPalette)
+	b, _ := LoadFromBytes(palettes.DefaultPalette)
 	if !a.Equals(b) {
 		t.Error("identical palettes should compare equal")
 	}
@@ -138,7 +138,7 @@ func TestLoadLookup(t *testing.T) {
 		t.Errorf("lookup size = %d, want %d", len(table), FileSize)
 	}
 
-	pal, _ := LoadFromBytes(assets.DefaultPalette)
+	pal, _ := LoadFromBytes(palettes.DefaultPalette)
 	img, err := RenderLookupSwatch(table, pal, 2)
 	if err != nil {
 		t.Fatalf("RenderLookupSwatch: %v", err)

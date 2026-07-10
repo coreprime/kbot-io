@@ -12,9 +12,9 @@ import (
 	"image/gif"
 	"image/png"
 	"io"
-	
-	"github.com/coreprime/kbot/internal/assets"
-	"github.com/coreprime/kbot/formats/gaf"
+
+	"github.com/coreprime/kbot-io/formats/gaf"
+	"github.com/coreprime/kbot-io/palettes"
 )
 
 // Header represents the PCX file header
@@ -54,27 +54,27 @@ func LoadFromReader(r io.Reader) (*Reader, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read PCX data: %w", err)
 	}
-	
+
 	reader := &Reader{
 		r:       bytes.NewReader(data),
 		rawData: data,
 	}
-	
+
 	// Read header
 	if err := binary.Read(reader.r, binary.LittleEndian, &reader.header); err != nil {
 		return nil, fmt.Errorf("failed to read PCX header: %w", err)
 	}
-	
+
 	// Validate header
 	if reader.header.Manufacturer != 0x0A {
 		return nil, fmt.Errorf("invalid PCX file: manufacturer byte is 0x%02X (expected 0x0A)", reader.header.Manufacturer)
 	}
-	
+
 	// Check for embedded palette (marker 0x0C before last 768 bytes)
 	if len(data) >= 769 && data[len(data)-769] == 0x0C {
 		reader.embedded = true
 	}
-	
+
 	return reader, nil
 }
 
@@ -103,11 +103,11 @@ func (r *Reader) Decode() (image.Image, error) {
 	width := r.Width()
 	height := r.Height()
 	bitsPerPixel := r.BitsPerPixel()
-	
+
 	// Create image based on bit depth
 	var img image.Image
 	var palette color.Palette
-	
+
 	if bitsPerPixel == 8 && r.header.NumPlanes == 1 {
 		// 8-bit paletted image
 		pal, err := r.readPalette()
@@ -115,28 +115,28 @@ func (r *Reader) Decode() (image.Image, error) {
 			return nil, err
 		}
 		palette = pal
-		
+
 		paletted := image.NewPaletted(image.Rect(0, 0, width, height), palette)
-		
+
 		// Decode RLE data
 		if err := r.decodeRLE8(paletted); err != nil {
 			return nil, err
 		}
-		
+
 		img = paletted
 	} else if bitsPerPixel == 24 && r.header.NumPlanes == 3 {
 		// 24-bit RGB image
 		rgba := image.NewRGBA(image.Rect(0, 0, width, height))
-		
+
 		if err := r.decodeRLE24(rgba); err != nil {
 			return nil, err
 		}
-		
+
 		img = rgba
 	} else {
 		return nil, fmt.Errorf("unsupported PCX format: %d bits per pixel, %d planes", r.header.BitsPerPixel, r.header.NumPlanes)
 	}
-	
+
 	return img, nil
 }
 
@@ -147,7 +147,7 @@ func (r *Reader) readPalette() (color.Palette, error) {
 		// Extract palette from end of file (last 768 bytes after 0x0C marker)
 		paletteData := r.rawData[len(r.rawData)-768:]
 		pal := make(color.Palette, 256)
-		
+
 		for i := 0; i < 256; i++ {
 			pal[i] = color.RGBA{
 				R: paletteData[i*3],
@@ -156,12 +156,12 @@ func (r *Reader) readPalette() (color.Palette, error) {
 				A: 255,
 			}
 		}
-		
+
 		return pal, nil
 	}
-	
+
 	// Use embedded TA palette (most TA PCX files use this palette anyway)
-	palette, err := gaf.LoadPaletteFromBytes(assets.DefaultPalette)
+	palette, err := gaf.LoadPaletteFromBytes(palettes.DefaultPalette)
 	if err != nil {
 		// Fallback to grayscale if TA palette fails
 		pal := make(color.Palette, 256)
@@ -171,13 +171,13 @@ func (r *Reader) readPalette() (color.Palette, error) {
 		}
 		return pal, nil
 	}
-	
+
 	// Convert gaf.Palette to color.Palette
 	colorPalette := make(color.Palette, len(palette.Colors))
 	for i, c := range palette.Colors {
 		colorPalette[i] = c
 	}
-	
+
 	return colorPalette, nil
 }
 
@@ -186,10 +186,10 @@ func (r *Reader) decodeRLE8(img *image.Paletted) error {
 	width := r.Width()
 	height := r.Height()
 	bytesPerLine := int(r.header.BytesPerLine)
-	
+
 	br := bufio.NewReader(r.r)
 	scanline := make([]byte, bytesPerLine)
-	
+
 	for y := 0; y < height; y++ {
 		// Decode one scanline
 		x := 0
@@ -202,7 +202,7 @@ func (r *Reader) decodeRLE8(img *image.Paletted) error {
 				}
 				return fmt.Errorf("failed to read RLE data at line %d: %w", y, err)
 			}
-			
+
 			if (b & 0xC0) == 0xC0 {
 				// Run length encoded
 				count := int(b & 0x3F)
@@ -214,7 +214,7 @@ func (r *Reader) decodeRLE8(img *image.Paletted) error {
 					}
 					return fmt.Errorf("failed to read RLE value at line %d: %w", y, err)
 				}
-				
+
 				for i := 0; i < count && x < bytesPerLine; i++ {
 					scanline[x] = value
 					x++
@@ -225,13 +225,13 @@ func (r *Reader) decodeRLE8(img *image.Paletted) error {
 				x++
 			}
 		}
-		
+
 		// Copy scanline to image
 		for x := 0; x < width && x < bytesPerLine; x++ {
 			img.SetColorIndex(x, y, scanline[x])
 		}
 	}
-	
+
 	return nil
 }
 
@@ -240,30 +240,30 @@ func (r *Reader) decodeRLE24(img *image.RGBA) error {
 	width := r.Width()
 	height := r.Height()
 	bytesPerLine := int(r.header.BytesPerLine)
-	
+
 	br := bufio.NewReader(r.r)
-	
+
 	// Three planes: R, G, B
 	rPlane := make([]byte, bytesPerLine)
 	gPlane := make([]byte, bytesPerLine)
 	bPlane := make([]byte, bytesPerLine)
-	
+
 	for y := 0; y < height; y++ {
 		// Decode R plane
 		if err := r.decodeScanline(br, rPlane); err != nil {
 			return fmt.Errorf("failed to decode R plane at line %d: %w", y, err)
 		}
-		
+
 		// Decode G plane
 		if err := r.decodeScanline(br, gPlane); err != nil {
 			return fmt.Errorf("failed to decode G plane at line %d: %w", y, err)
 		}
-		
+
 		// Decode B plane
 		if err := r.decodeScanline(br, bPlane); err != nil {
 			return fmt.Errorf("failed to decode B plane at line %d: %w", y, err)
 		}
-		
+
 		// Combine planes into RGB pixels
 		for x := 0; x < width && x < bytesPerLine; x++ {
 			img.SetRGBA(x, y, color.RGBA{
@@ -274,7 +274,7 @@ func (r *Reader) decodeRLE24(img *image.RGBA) error {
 			})
 		}
 	}
-	
+
 	return nil
 }
 
@@ -282,13 +282,13 @@ func (r *Reader) decodeRLE24(img *image.RGBA) error {
 func (r *Reader) decodeScanline(br *bufio.Reader, scanline []byte) error {
 	x := 0
 	bytesPerLine := len(scanline)
-	
+
 	for x < bytesPerLine {
 		b, err := br.ReadByte()
 		if err != nil {
 			return err
 		}
-		
+
 		if (b & 0xC0) == 0xC0 {
 			// Run length encoded
 			count := int(b & 0x3F)
@@ -296,7 +296,7 @@ func (r *Reader) decodeScanline(br *bufio.Reader, scanline []byte) error {
 			if err != nil {
 				return err
 			}
-			
+
 			for i := 0; i < count && x < bytesPerLine; i++ {
 				scanline[x] = value
 				x++
@@ -307,7 +307,7 @@ func (r *Reader) decodeScanline(br *bufio.Reader, scanline []byte) error {
 			x++
 		}
 	}
-	
+
 	return nil
 }
 
@@ -317,12 +317,12 @@ func ConvertToPNG(w io.Writer, r io.Reader) error {
 	if err != nil {
 		return err
 	}
-	
+
 	img, err := reader.Decode()
 	if err != nil {
 		return err
 	}
-	
+
 	return png.Encode(w, img)
 }
 
@@ -332,35 +332,35 @@ func ConvertToGIF(w io.Writer, r io.Reader) error {
 	if err != nil {
 		return err
 	}
-	
+
 	img, err := reader.Decode()
 	if err != nil {
 		return err
 	}
-	
+
 	// If already paletted, encode directly
 	if paletted, ok := img.(*image.Paletted); ok {
 		return gif.Encode(w, paletted, nil)
 	}
-	
+
 	// Otherwise convert to paletted with 256-color palette
 	bounds := img.Bounds()
-	
+
 	// Create a simple 256-color palette
 	palette := make(color.Palette, 256)
 	for i := 0; i < 256; i++ {
 		palette[i] = color.RGBA{uint8(i), uint8(i), uint8(i), 255}
 	}
-	
+
 	paletted := image.NewPaletted(bounds, palette)
-	
+
 	// Copy pixels
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			paletted.Set(x, y, img.At(x, y))
 		}
 	}
-	
+
 	return gif.Encode(w, paletted, nil)
 }
 
@@ -370,12 +370,12 @@ func ConvertToBMP(w io.Writer, r io.Reader) error {
 	if err != nil {
 		return err
 	}
-	
+
 	img, err := reader.Decode()
 	if err != nil {
 		return err
 	}
-	
+
 	// Simple BMP encoding
 	return encodeBMP(w, img)
 }
@@ -385,11 +385,11 @@ func encodeBMP(w io.Writer, img image.Image) error {
 	bounds := img.Bounds()
 	width := bounds.Dx()
 	height := bounds.Dy()
-	
+
 	// Calculate row size (must be multiple of 4)
 	rowSize := ((width * 3) + 3) & ^3
 	imageSize := rowSize * height
-	
+
 	// BMP file header
 	fileHeader := []byte{
 		'B', 'M', // Signature
@@ -397,7 +397,7 @@ func encodeBMP(w io.Writer, img image.Image) error {
 		0, 0, 0, 0, // Reserved
 		54, 0, 0, 0, // Pixel data offset
 	}
-	
+
 	// BMP info header
 	infoHeader := []byte{
 		40, 0, 0, 0, // Header size
@@ -412,16 +412,16 @@ func encodeBMP(w io.Writer, img image.Image) error {
 		0, 0, 0, 0, // Colors used
 		0, 0, 0, 0, // Important colors
 	}
-	
+
 	// Fill in file size
 	fileSize := 54 + imageSize
 	binary.LittleEndian.PutUint32(fileHeader[2:], uint32(fileSize))
-	
+
 	// Fill in dimensions
 	binary.LittleEndian.PutUint32(infoHeader[4:], uint32(width))
 	binary.LittleEndian.PutUint32(infoHeader[8:], uint32(height))
 	binary.LittleEndian.PutUint32(infoHeader[20:], uint32(imageSize))
-	
+
 	// Write headers
 	if _, err := w.Write(fileHeader); err != nil {
 		return err
@@ -429,10 +429,10 @@ func encodeBMP(w io.Writer, img image.Image) error {
 	if _, err := w.Write(infoHeader); err != nil {
 		return err
 	}
-	
+
 	// Write pixel data (bottom-up, BGR format)
 	padding := make([]byte, rowSize-(width*3))
-	
+
 	for y := height - 1; y >= 0; y-- {
 		for x := 0; x < width; x++ {
 			r, g, b, _ := img.At(bounds.Min.X+x, bounds.Min.Y+y).RGBA()
@@ -448,7 +448,7 @@ func encodeBMP(w io.Writer, img image.Image) error {
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -458,28 +458,28 @@ func ConvertToGIFWithPalette(w io.Writer, r io.Reader, pal *gaf.Palette) error {
 	if err != nil {
 		return err
 	}
-	
+
 	img, err := reader.Decode()
 	if err != nil {
 		return err
 	}
-	
+
 	// Convert GAF palette to color.Palette
 	palette := make(color.Palette, 256)
 	for i := 0; i < 256; i++ {
 		palette[i] = pal.Colors[i]
 	}
-	
+
 	bounds := img.Bounds()
 	paletted := image.NewPaletted(bounds, palette)
-	
+
 	// Copy pixels (index mapping)
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			paletted.Set(x, y, img.At(x, y))
 		}
 	}
-	
+
 	return gif.Encode(w, paletted, nil)
 }
 
