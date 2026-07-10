@@ -51,7 +51,14 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
+      # Pin golangci-lint to the version used locally / by the kbot repo.
+      # `version: latest` on golangci-lint-action resolves to a v1 build
+      # compiled with an older Go than this module's `go` directive, which the
+      # linter rejects ("built with go1.24 ... lower than the targeted Go
+      # version 1.25.5"). The pinned v2 release is prebuilt with a newer Go, so
+      # it satisfies that gate and matches the local `golangci-lint run ./...`.
+      - name: Install golangci-lint
+        run: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
+        run: golangci-lint run ./...
