@@ -211,7 +211,10 @@ func readObjectAt(r io.ReadSeeker, offset int64, raw *rawObject) (*Object, error
 
 			if rp.NumberOfVertexIndexes > 0 && rp.OffsetToVertexIndexArray > 0 {
 				if _, err := r.Seek(int64(rp.OffsetToVertexIndexArray), io.SeekStart); err == nil {
-					indices := make([]int16, rp.NumberOfVertexIndexes)
+					// Vertex indices are stored as unsigned 16-bit values; reading
+					// them signed would map any index above 32767 to a negative,
+					// wrong vertex.
+					indices := make([]uint16, rp.NumberOfVertexIndexes)
 					if err := binary.Read(r, binary.LittleEndian, indices); err == nil {
 						p.VertexIndices = make([]int, len(indices))
 						for j, idx := range indices {
@@ -241,7 +244,12 @@ func readString(r io.ReadSeeker, offset int64) string {
 		return ""
 	}
 	var buf [256]byte
-	n, _ := r.Read(buf[:])
+	// A single Read may short-read mid-stream; ReadFull fills the buffer,
+	// tolerating a truncated final read near end of file.
+	n, err := io.ReadFull(r, buf[:])
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return ""
+	}
 	for i := 0; i < n; i++ {
 		if buf[i] == 0 {
 			return string(buf[:i])
