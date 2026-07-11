@@ -98,11 +98,30 @@ func (r *Reader) BitsPerPixel() int {
 	return int(r.header.BitsPerPixel) * int(r.header.NumPlanes)
 }
 
+// maxImagePixels caps the pixel count of a decoded PCX image. XMax/XMin and
+// YMax/YMin are attacker-controlled uint16 fields; an XMax<XMin (or YMax<YMin)
+// header underflows the uint16 subtraction in Width/Height into a value near
+// 65536, which would otherwise force a ~4 GB allocation. The largest stock TA
+// PCX bitmaps are 640x480 (~307K pixels); this ceiling sits far above any real
+// asset yet rejects the pathological allocation.
+const maxImagePixels = 64 << 20
+
 // Decode decodes the PCX image and returns an image.Image
 func (r *Reader) Decode() (image.Image, error) {
+	// Reject headers whose max coordinate is below its min: the uint16
+	// subtraction in Width/Height would wrap around into a huge dimension.
+	if r.header.XMax < r.header.XMin || r.header.YMax < r.header.YMin {
+		return nil, fmt.Errorf("invalid PCX dimensions: XMin=%d XMax=%d YMin=%d YMax=%d",
+			r.header.XMin, r.header.XMax, r.header.YMin, r.header.YMax)
+	}
+
 	width := r.Width()
 	height := r.Height()
 	bitsPerPixel := r.BitsPerPixel()
+
+	if uint64(width)*uint64(height) > maxImagePixels {
+		return nil, fmt.Errorf("PCX dimensions %dx%d exceed maximum of %d pixels", width, height, maxImagePixels)
+	}
 
 	// Create image based on bit depth
 	var img image.Image

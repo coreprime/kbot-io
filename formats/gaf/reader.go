@@ -7,6 +7,23 @@ import (
 	"os"
 )
 
+// maxFramePixels caps the pixel count of a single decoded frame. Width and
+// height are attacker-controlled uint16 fields, so a crafted header could ask
+// for up to 65535x65535 (~4 GB) and force an out-of-memory allocation before
+// any read fails. The largest stock TA/TA:K GAF frames are 640x480 interface
+// art (~307K pixels); this ceiling sits far above any real asset yet rejects
+// the pathological allocation.
+const maxFramePixels = 64 << 20
+
+// frameByteCount validates frame dimensions and returns the pixel-buffer size.
+func frameByteCount(width, height uint16) (int, error) {
+	size := uint64(width) * uint64(height)
+	if size > maxFramePixels {
+		return 0, fmt.Errorf("frame dimensions %dx%d exceed maximum of %d pixels", width, height, maxFramePixels)
+	}
+	return int(size), nil
+}
+
 // Reader reads GAF files.
 type Reader struct {
 	file   io.ReadSeeker
@@ -168,6 +185,9 @@ func (r *Reader) readLayeredFrame(fi *FrameInfo, duration uint32) (*Frame, error
 	}
 
 	w, h := int(fi.Width), int(fi.Height)
+	if _, err := frameByteCount(fi.Width, fi.Height); err != nil {
+		return nil, err
+	}
 	canvas := make([]byte, w*h)
 	for i := range canvas {
 		canvas[i] = fi.TransparencyIndex
@@ -255,7 +275,10 @@ func (r *Reader) readSimpleFrame(fi *FrameInfo, transparencyIndex uint8, duratio
 
 // readUncompressed reads uncompressed pixel data.
 func (r *Reader) readUncompressed(width, height uint16) ([]byte, error) {
-	size := int(width) * int(height)
+	size, err := frameByteCount(width, height)
+	if err != nil {
+		return nil, err
+	}
 	pixels := make([]byte, size)
 	if _, err := io.ReadFull(r.file, pixels); err != nil {
 		return nil, fmt.Errorf("failed to read uncompressed pixels: %w", err)
@@ -265,7 +288,11 @@ func (r *Reader) readUncompressed(width, height uint16) ([]byte, error) {
 
 // readCompressed reads compressed pixel data (row-based RLE compression).
 func (r *Reader) readCompressed(width, height uint16, transparencyIndex uint8) ([]byte, error) {
-	pixels := make([]byte, int(width)*int(height))
+	size, err := frameByteCount(width, height)
+	if err != nil {
+		return nil, err
+	}
+	pixels := make([]byte, size)
 	pos := 0
 
 	for row := uint16(0); row < height; row++ {
