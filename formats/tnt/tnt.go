@@ -425,7 +425,11 @@ func (m *Map) GetFeaturePlacements() []FeaturePlacement {
 	for ay := 0; ay < m.AttrH; ay++ {
 		for ax := 0; ax < m.AttrW; ax++ {
 			f := m.TileAttr[ay*m.AttrW+ax].Feature
-			if f == 0xFFFF || f == 0xFFFC || f == 0xFFFE {
+			// Any value at or above the sentinel threshold (0xFFFF empty,
+			// 0xFFFC void, and other 0xFFxx markers) is not a feature index.
+			// This matches the threshold used by the TA:K feature path and the
+			// packer rather than an incomplete hard-coded sentinel list.
+			if f >= takNoFeature {
 				continue
 			}
 			placements = append(placements, FeaturePlacement{
