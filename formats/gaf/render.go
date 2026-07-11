@@ -168,21 +168,8 @@ func (s *Sequence) ToGIFWith(palette *Palette, opts RenderOptions) (*gif.GIF, er
 		xOffset := int(-frame.OriginX - minX)
 		yOffset := int(-frame.OriginY - minY)
 
-		for y := 0; y < int(frame.Height); y++ {
-			for x := 0; x < int(frame.Width); x++ {
-				canvasX := x + xOffset
-				canvasY := y + yOffset
-
-				if canvasX >= 0 && canvasX < canvasWidth && canvasY >= 0 && canvasY < canvasHeight {
-					srcIdx := y*int(frame.Width) + x
-					dstIdx := canvasY*canvasWidth + canvasX
-
-					if srcIdx < len(frameImg.Pix) && dstIdx < len(canvas.Pix) {
-						canvas.Pix[dstIdx] = frameImg.Pix[srcIdx]
-					}
-				}
-			}
-		}
+		compositeFrameOntoCanvas(canvas, frameImg, frame, xOffset, yOffset,
+			transparencyIndex, applyTransparency, opts)
 
 		g.Image = append(g.Image, canvas)
 
@@ -196,6 +183,45 @@ func (s *Sequence) ToGIFWith(palette *Palette, opts RenderOptions) (*gif.GIF, er
 	}
 
 	return g, nil
+}
+
+// compositeFrameOntoCanvas blits a rendered frame onto a full-size animation
+// canvas, positioning its top-left at (offsetX, offsetY).
+//
+// Each frame is rendered by ToImageWith as raw palette indices. When a frame's
+// own resolved transparent index differs from the sequence-wide global index —
+// as happens with TA: Kingdoms uncompressed atlases, where one frame resolves
+// index 9 and another resolves index 0 — a raw blit would composite that
+// frame's transparent background as an opaque palette entry (the global palette
+// only marks globalTransIdx transparent). To keep every frame's background
+// transparent, any pixel equal to the frame's own transparent index is remapped
+// to globalTransIdx, the slot the animation marks transparent.
+func compositeFrameOntoCanvas(canvas, frameImg *image.Paletted, frame *Frame, offsetX, offsetY int, globalTransIdx uint8, applyTransparency bool, opts RenderOptions) {
+	canvasW := canvas.Rect.Dx()
+	canvasH := canvas.Rect.Dy()
+
+	frameTransIdx, frameApply := frame.resolveTransparency(opts)
+	remap := applyTransparency && frameApply && frameTransIdx != globalTransIdx
+
+	for y := 0; y < int(frame.Height); y++ {
+		for x := 0; x < int(frame.Width); x++ {
+			canvasX := x + offsetX
+			canvasY := y + offsetY
+			if canvasX < 0 || canvasX >= canvasW || canvasY < 0 || canvasY >= canvasH {
+				continue
+			}
+			srcIdx := y*int(frame.Width) + x
+			dstIdx := canvasY*canvasW + canvasX
+			if srcIdx >= len(frameImg.Pix) || dstIdx >= len(canvas.Pix) {
+				continue
+			}
+			px := frameImg.Pix[srcIdx]
+			if remap && px == frameTransIdx {
+				px = globalTransIdx
+			}
+			canvas.Pix[dstIdx] = px
+		}
+	}
 }
 
 // WriteGIF writes an animated GIF to the given writer using auto transparency.

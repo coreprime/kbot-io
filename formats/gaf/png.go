@@ -231,17 +231,8 @@ func (s *Sequence) ToAPNGWith(palette *Palette, opts RenderOptions, w io.Writer)
 		// through so the per-frame palette matches the APNG global palette).
 		frameImg := frame.ToImageWith(palette, opts)
 
-		for y := 0; y < int(frame.Height); y++ {
-			for x := 0; x < int(frame.Width); x++ {
-				canvasX := x + offsetX
-				canvasY := y + offsetY
-				if canvasX >= 0 && canvasX < canvasWidth && canvasY >= 0 && canvasY < canvasHeight {
-					srcIdx := y*int(frame.Width) + x
-					dstIdx := canvasY*canvasWidth + canvasX
-					canvas.Pix[dstIdx] = frameImg.Pix[srcIdx]
-				}
-			}
-		}
+		compositeFrameOntoCanvas(canvas, frameImg, frame, offsetX, offsetY,
+			transparencyIndex, applyTransparency, opts)
 
 		// Calculate delay
 		delay := uint16((frame.Duration * 100) / 30)
