@@ -1,0 +1,57 @@
+version: '3'
+
+dotenv: ['.env.local', '.env']
+
+tasks:
+  default:
+    desc: Full quality gate — deps, fmt-check, vet, build, test, lint
+    cmds:
+      - task: deps
+      - task: fmt-check
+      - task: vet
+      - task: build
+      - task: test
+      - task: lint
+
+  deps:
+    desc: Download Go module dependencies
+    cmds:
+      - go mod download
+
+  fmt:
+    desc: Format all Go sources with gofmt
+    cmds:
+      - gofmt -w $(git ls-files '*.go')
+
+  fmt-check:
+    desc: Verify every Go source is gofmt-clean
+    cmds:
+      - |
+        out="$(gofmt -l $(git ls-files '*.go'))"
+        if [ -n "$out" ]; then
+          echo "The following files are not gofmt-clean:"
+          echo "$out"
+          exit 1
+        fi
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  build:
+    desc: Build all packages
+    cmds:
+      - go build ./...
+
+  test:
+    desc: Run all Go tests (asset-gated tests skip cleanly)
+    env:
+      ALLOW_SKIP_ASSETS: 'true'
+    cmds:
+      - go test ./...
+
+  lint:
+    desc: Run golangci-lint (pinned to the CI version, assumed installed)
+    cmds:
+      - golangci-lint run ./...
