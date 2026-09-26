@@ -22,6 +22,7 @@ type Compiler struct {
 	currentScript *CompiledScript
 	localIndex    map[string]int
 	paramCount    int
+	lastOpcode    uint32 // last instruction emitted into currentScript
 
 	// COB metadata picked up from optional top-of-file BOS directives.
 	// `.version` and `.sound_name "…"` are emitted by
@@ -31,13 +32,40 @@ type Compiler struct {
 	// names.
 	versionOverride int
 	soundNames      []string
+	field5          uint32
+	angleUnits      angleUnits
+
+	warnings []string
 }
+
+// angleUnits selects how the compiler reads a numeric <n> literal.
+type angleUnits int
+
+const (
+	angleUnitsDefault angleUnits = iota // not set: degrees, unless the source is a legacy decompile
+	angleUnitsDegrees                   // <n> is n degrees (65536 per turn)
+	angleUnitsRaw                       // <n> is the integer n itself
+)
+
+// legacyDecompileBanner starts every BOS file written by earlier versions
+// of the decompiler, which put raw values inside angle brackets.
+const legacyDecompileBanner = "// Decompiled from COB bytecode"
+
+// kingdomsVersion is the COB version signature of TA: Kingdoms scripts.
+const kingdomsVersion = 6
 
 // CompiledScript represents a compiled script
 type CompiledScript struct {
 	Name   string
 	Code   []uint32 // Raw bytecode (opcodes and operands)
 	Offset int      // Byte offset in code section
+}
+
+// functionSource is one function definition found in the source.
+type functionSource struct {
+	name   string
+	params []string
+	body   []string
 }
 
 // NewCompiler creates a new compiler
@@ -53,27 +81,103 @@ func NewCompiler(source string) *Compiler {
 	}
 }
 
-// Compile compiles BOS to scripting.COB
+// Warnings returns the non-fatal problems the last Compile call found, such
+// as a function defined twice.
+func (c *Compiler) Warnings() []string {
+	return c.warnings
+}
+
+// Compile compiles BOS to scripting.COB.
+//
+// The output is always code the game can run: the compiler rejects
+// constructs it cannot express correctly instead of emitting a placeholder.
+// Unknown identifiers, the `%` operator (the game has no modulo
+// instruction), functions with more than scripting.StackSlots local slots
+// and expressions that need more stack than that are errors. TA: Kingdoms
+// constructs (play-sound, Mission-Command, the __tak_math_* intrinsics and
+// `.sound_name`) are accepted only after `.version 6`. When a function name
+// is defined twice both definitions are compiled, calls bind to the first
+// (as the game's name lookup does), and Warnings reports the duplicate. A
+// function whose code does not end with RETURN gets `return 0` appended.
 func (c *Compiler) Compile() (*scripting.COB, error) {
+	// Trailing // comments are dropped up front so that statements, braces
+	// and `else` are recognised whatever follows them on the line.
 	lines := strings.Split(c.source, "\n")
+	for i, line := range lines {
+		lines[i] = stripLineComment(line)
+	}
 
 	// Phase 1: Parse declarations
 	if err := c.parseDeclarations(lines); err != nil {
 		return nil, err
 	}
+	if len(c.soundNames) > 0 && !c.kingdoms() {
+		return nil, fmt.Errorf(".sound_name is a TA: Kingdoms table; declare `.version %d` to use it", kingdomsVersion)
+	}
+	if c.angleUnits == angleUnitsDefault && firstLine(c.source) == legacyDecompileBanner {
+		c.angleUnits = angleUnitsRaw
+	}
 
-	// Phase 2: Parse and compile functions
-	if err := c.compileFunctions(lines); err != nil {
+	// Phase 2: Collect every function first so calls can refer to
+	// functions defined later, then compile them in source order.
+	funcs, err := c.collectFunctions(lines)
+	if err != nil {
 		return nil, err
+	}
+	for i, f := range funcs {
+		if first, dup := c.scriptIndex[f.name]; dup {
+			c.warnings = append(c.warnings, fmt.Sprintf(
+				"function %s is defined more than once; calls and the game use the first definition (script %d)",
+				f.name, first))
+			continue
+		}
+		c.scriptIndex[f.name] = i
+	}
+	for _, f := range funcs {
+		script, err := c.compileFunction(f.name, f.params, f.body)
+		if err != nil {
+			return nil, fmt.Errorf("compiling %s: %w", f.name, err)
+		}
+		c.scripts = append(c.scripts, script)
 	}
 
 	// Phase 3: Build scripting.COB structure
 	return c.buildCOB(), nil
 }
 
+// version returns the COB version signature being compiled for.
+func (c *Compiler) version() int {
+	if c.versionOverride != 0 {
+		return c.versionOverride
+	}
+	return 4
+}
+
+// kingdoms reports whether the script declares TA: Kingdoms (version 6).
+func (c *Compiler) kingdoms() bool {
+	return c.version() == kingdomsVersion
+}
+
+// requireKingdoms rejects a TA: Kingdoms construct in a TA script.
+func (c *Compiler) requireKingdoms(construct string) error {
+	if c.kingdoms() {
+		return nil
+	}
+	return fmt.Errorf("%s is a TA: Kingdoms instruction that TA faults on; declare `.version %d` to compile it",
+		construct, kingdomsVersion)
+}
+
+func firstLine(source string) string {
+	for _, line := range strings.Split(source, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	return ""
+}
+
 // parseDeclarations extracts piece and static-var declarations, plus the
-// optional `.version` / `.extra_header` / `.trailing_data` metadata
-// directives the decompiler emits for TA: Kingdoms .cob files.
+// optional top-of-file metadata directives (see parseDirective).
 func (c *Compiler) parseDeclarations(lines []string) error {
 	pieceRE := regexp.MustCompile(`^piece\s+(.+);`)
 	staticRE := regexp.MustCompile(`^static-var\s+(.+);`)
@@ -120,7 +224,14 @@ func (c *Compiler) parseDeclarations(lines []string) error {
 	return nil
 }
 
-// parseDirective handles top-of-file BOS directives.
+// parseDirective handles top-of-file BOS directives:
+//
+//	.version N          COB version signature (4 for TA, 6 for TA: Kingdoms)
+//	.sound_name "..."   TA: Kingdoms sound-name table entry (version 6 only)
+//	.field5 N           header field 5 (COB.UKZero), 0 when absent
+//	.angle_units U      how a numeric <n> literal is read: degrees (the
+//	                    default) or raw (the value itself, as earlier
+//	                    decompilers wrote it)
 func (c *Compiler) parseDirective(line string) error {
 	parts := strings.SplitN(line, " ", 2)
 	directive := parts[0]
@@ -141,6 +252,21 @@ func (c *Compiler) parseDirective(line string) error {
 			return fmt.Errorf("bad .sound_name value %q: %w", arg, err)
 		}
 		c.soundNames = append(c.soundNames, s)
+	case ".field5":
+		v, err := strconv.ParseUint(arg, 0, 32)
+		if err != nil {
+			return fmt.Errorf("bad .field5 value %q: %w", arg, err)
+		}
+		c.field5 = uint32(v)
+	case ".angle_units":
+		switch arg {
+		case "degrees":
+			c.angleUnits = angleUnitsDegrees
+		case "raw":
+			c.angleUnits = angleUnitsRaw
+		default:
+			return fmt.Errorf("bad .angle_units value %q (want degrees or raw)", arg)
+		}
 	case ".statics":
 		// Tolerated for symmetry with the assembler form. The actual
 		// static count is derived from `static-var` declarations.
@@ -152,10 +278,11 @@ func (c *Compiler) parseDirective(line string) error {
 	return nil
 }
 
-// compileFunctions finds and compiles all function definitions
-func (c *Compiler) compileFunctions(lines []string) error {
+// collectFunctions finds every function definition and its body.
+func (c *Compiler) collectFunctions(lines []string) ([]functionSource, error) {
 	funcRE := regexp.MustCompile(`^([a-zA-Z_][a-zA-Z0-9_]*)\s*\((.*?)\)\s*$`)
 
+	var funcs []functionSource
 	i := 0
 	for i < len(lines) {
 		line := strings.TrimSpace(lines[i])
@@ -174,7 +301,7 @@ func (c *Compiler) compileFunctions(lines []string) error {
 
 			// Parse parameters
 			params := []string{}
-			if paramsStr != "" {
+			if strings.TrimSpace(paramsStr) != "" {
 				for _, p := range strings.Split(paramsStr, ",") {
 					params = append(params, strings.TrimSpace(p))
 				}
@@ -183,7 +310,7 @@ func (c *Compiler) compileFunctions(lines []string) error {
 			// Expect {
 			i++
 			if i >= len(lines) || strings.TrimSpace(lines[i]) != "{" {
-				return fmt.Errorf("expected '{' after %s()", funcName)
+				return nil, fmt.Errorf("expected '{' after %s()", funcName)
 			}
 
 			// Find matching }
@@ -200,23 +327,19 @@ func (c *Compiler) compileFunctions(lines []string) error {
 				}
 				i++
 			}
+			if depth > 0 {
+				return nil, fmt.Errorf("missing '}' at the end of %s()", funcName)
+			}
 			end := i - 1
 
-			// Compile function
-			script, err := c.compileFunction(funcName, params, lines[start:end])
-			if err != nil {
-				return fmt.Errorf("compiling %s: %w", funcName, err)
-			}
-
-			c.scriptIndex[funcName] = len(c.scripts)
-			c.scripts = append(c.scripts, script)
+			funcs = append(funcs, functionSource{name: funcName, params: params, body: lines[start:end]})
 			continue
 		}
 
 		i++
 	}
 
-	return nil
+	return funcs, nil
 }
 
 // compileFunction compiles a single function body
@@ -227,12 +350,26 @@ func (c *Compiler) compileFunction(name string, params []string, bodyLines []str
 	}
 
 	c.currentScript = script
+	c.lastOpcode = 0
 	c.localIndex = make(map[string]int)
 	c.paramCount = len(params)
 
+	addLocal := func(v string) error {
+		if !validIdentifier(v) {
+			return fmt.Errorf("bad local variable name %q", v)
+		}
+		if _, dup := c.localIndex[v]; dup {
+			return fmt.Errorf("local variable %s is declared twice", v)
+		}
+		c.localIndex[v] = len(c.localIndex)
+		return nil
+	}
+
 	// Build local variable index (parameters first)
-	for i, p := range params {
-		c.localIndex[p] = i
+	for _, p := range params {
+		if err := addLocal(p); err != nil {
+			return nil, err
+		}
 	}
 
 	// Parse local var declarations
@@ -246,15 +383,23 @@ func (c *Compiler) compileFunction(name string, params []string, bodyLines []str
 		}
 
 		if m := varRE.FindStringSubmatch(line); m != nil {
-			vars := strings.Split(m[1], ",")
-			for _, v := range vars {
-				v = strings.TrimSpace(v)
-				c.localIndex[v] = len(c.localIndex)
+			for _, v := range strings.Split(m[1], ",") {
+				if err := addLocal(strings.TrimSpace(v)); err != nil {
+					return nil, err
+				}
 			}
 			bodyStart = idx + 1
 			continue
 		}
 		break
+	}
+
+	// The game gives each script context scripting.StackSlots slots for
+	// locals and pending values together; beyond that it overwrites the
+	// memory after the context.
+	if len(c.localIndex) > scripting.StackSlots {
+		return nil, fmt.Errorf("%d parameters and local variables exceed the game's %d stack slots",
+			len(c.localIndex), scripting.StackSlots)
 	}
 
 	// Emit STACK_ALLOC for ALL locals including parameters (matches original TA compiler)
@@ -267,20 +412,75 @@ func (c *Compiler) compileFunction(name string, params []string, bodyLines []str
 		return nil, err
 	}
 
+	// A function whose code does not end with RETURN would run on into
+	// the next function's code. End it like the retail compiler does, with
+	// `return 0` (TA: Kingdoms: the value-less `return;` form), unless the
+	// last instruction already is a RETURN. (As with the retail compiler, a
+	// final `if` whose block ends in a return still lets the false branch
+	// continue past the function.)
+	if c.lastOpcode != scripting.OP_RETURN {
+		if c.kingdoms() {
+			c.emit(scripting.OP_STACK_ALLOC, 0)
+		} else {
+			c.emit(scripting.OP_PUSH_CONSTANT, 0)
+		}
+		c.emit(scripting.OP_RETURN, 0)
+	}
+
+	if err := c.checkStack(script); err != nil {
+		return nil, err
+	}
 	return script, nil
 }
 
-func (c *Compiler) emit(opcode uint32, operand int32) {
-	c.currentScript.Code = append(c.currentScript.Code, opcode)
+// checkStack verifies that the compiled function never pops a value no
+// expression pushed and stays within the game's stack slots.
+func (c *Compiler) checkStack(script *CompiledScript) error {
+	var insts []scripting.Instruction
+	for pos := 0; pos < len(script.Code); {
+		word := script.Code[pos]
+		inst := scripting.Instruction{Offset: uint32(pos * 4), Opcode: scripting.DispatchOpcode(word), Raw: word}
+		n := scripting.OpcodeParamCount(word)
+		if n >= 1 && pos+1 < len(script.Code) {
+			inst.Operand = int32(script.Code[pos+1])
+		}
+		if n >= 2 && pos+2 < len(script.Code) {
+			inst.Operand2 = int32(script.Code[pos+2])
+		}
+		insts = append(insts, inst)
+		pos += 1 + n
+	}
+	report := scripting.AnalyzeStack(insts, c.kingdoms())
+	for _, issue := range report.Issues {
+		switch issue.Kind {
+		case scripting.StackOverflow:
+			return fmt.Errorf("needs %d stack slots at 0x%04X; the game has %d",
+				issue.Need, issue.Offset, scripting.StackSlots)
+		case scripting.StackUnderflow:
+			return fmt.Errorf("internal error: %s at 0x%04X pops %d values but only %d are pending",
+				scripting.OpcodeName(issue.Opcode), issue.Offset, issue.Need, issue.Have)
+		}
+	}
+	return nil
+}
 
-	// Some opcodes don't have operands, but for simplicity we always emit
-	if scripting.OpcodeParamCount(opcode) > 0 {
-		c.currentScript.Code = append(c.currentScript.Code, uint32(operand))
+// emit appends an opcode and its inline operand words; operand fills the
+// first one and any further ones are zero.
+func (c *Compiler) emit(opcode uint32, operand int32) {
+	c.lastOpcode = opcode
+	c.currentScript.Code = append(c.currentScript.Code, opcode)
+	for i := 0; i < scripting.OpcodeParamCount(opcode); i++ {
+		if i == 0 {
+			c.currentScript.Code = append(c.currentScript.Code, uint32(operand))
+		} else {
+			c.currentScript.Code = append(c.currentScript.Code, 0)
+		}
 	}
 }
 
 // emit2 emits an opcode with two operands (for opcodes like MOVE_NOW, TURN_NOW)
 func (c *Compiler) emit2(opcode uint32, operand1 int32, operand2 int32) {
+	c.lastOpcode = opcode
 	c.currentScript.Code = append(c.currentScript.Code, opcode)
 	c.currentScript.Code = append(c.currentScript.Code, uint32(operand1))
 	c.currentScript.Code = append(c.currentScript.Code, uint32(operand2))
@@ -325,15 +525,6 @@ func parseAxis(axis string) (int, error) {
 	}
 }
 
-// stripAngleBrackets removes < > from expressions like <0> or <1277952>
-func stripAngleBrackets(expr string) string {
-	expr = strings.TrimSpace(expr)
-	if strings.HasPrefix(expr, "<") && strings.HasSuffix(expr, ">") {
-		return strings.TrimSpace(expr[1 : len(expr)-1])
-	}
-	return expr
-}
-
 // patchJump patches a jump instruction operand
 func (c *Compiler) patchJump(operandIdx int, target int) {
 	c.currentScript.Code[operandIdx] = uint32(target)
@@ -343,8 +534,6 @@ func (c *Compiler) patchJump(operandIdx int, target int) {
 func (c *Compiler) currentOffset() int {
 	return len(c.currentScript.Code)
 }
-
-// needsOperand checks if opcode needs an operand
 
 // buildCOB builds the final scripting.COB structure
 func (c *Compiler) buildCOB() *scripting.COB {
@@ -369,7 +558,7 @@ func (c *Compiler) buildCOB() *scripting.COB {
 			paramCount := scripting.OpcodeParamCount(opcode)
 			if (opcode == scripting.OP_JUMP || opcode == scripting.OP_JUMP_IF_FALSE) && i+1 < len(script.Code) {
 				// Operand is a script-local word offset — add base to make absolute
-				script.Code[i+1] += uint32(baseOffset)
+				script.Code[i+1] += baseOffset
 			}
 			i += paramCount // Skip operands
 		}
@@ -386,12 +575,9 @@ func (c *Compiler) buildCOB() *scripting.COB {
 	// carry an 8-byte sub-header between the canonical 44-byte header and
 	// the code section that the writer reconstructs from the structured
 	// fields below.
-	version := 4
-	if c.versionOverride != 0 {
-		version = c.versionOverride
-	}
+	version := c.version()
 	subHeaderSize := 0
-	if version == 6 {
+	if version == kingdomsVersion {
 		subHeaderSize = 8
 	}
 
@@ -407,7 +593,7 @@ func (c *Compiler) buildCOB() *scripting.COB {
 		NumPieces:          uint32(len(c.pieceNames)),
 		LengthOfScripts:    uint32(len(code) / 4),
 		NumberOfStaticVars: uint32(len(c.statics)),
-		UKZero:             0,
+		UKZero:             c.field5,
 		// OffsetToNameArray == byte just past the piece-name array
 		// (i.e. start of the sound-name offset table for v6, or
 		// string-pool start for v4 where there is no sound-name table).
@@ -424,4 +610,15 @@ func (c *Compiler) buildCOB() *scripting.COB {
 	}
 }
 
-// parseScriptCall splits "ScriptName(param1, param2)" into name and param string.
+func validIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		letter := r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+		if !letter && (i == 0 || r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
+}

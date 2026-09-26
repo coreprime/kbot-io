@@ -113,3 +113,22 @@ func (c *Compiler) compileDontShade(line string) error {
 	c.emit(scripting.OP_DONT_SHADE, int32(pieceIdx))
 	return nil
 }
+
+// compileShade compiles shade statement: shade piece;
+func (c *Compiler) compileShade(line string) error {
+	line = strings.TrimSuffix(strings.TrimSpace(line), ";")
+
+	shadeRE := regexp.MustCompile(`^shade\s+(\w+)$`)
+	m := shadeRE.FindStringSubmatch(line)
+	if m == nil {
+		return fmt.Errorf("invalid shade syntax: %s", line)
+	}
+
+	pieceIdx, err := c.getPieceIndex(m[1])
+	if err != nil {
+		return err
+	}
+
+	c.emit(scripting.OP_SHADE, int32(pieceIdx))
+	return nil
+}

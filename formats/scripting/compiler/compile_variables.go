@@ -19,8 +19,12 @@ func (c *Compiler) compileSet(line string) error {
 	value := strings.TrimSpace(parts[1])
 
 	// Original TA bytecode pushes port first, then value
-	c.compileExpression(port)
-	c.compileExpression(value)
+	if err := c.compileExpression(port); err != nil {
+		return err
+	}
+	if err := c.compileExpression(value); err != nil {
+		return err
+	}
 
 	c.emit(scripting.OP_SET_VALUE, 0)
 	return nil
@@ -37,7 +41,9 @@ func (c *Compiler) compileAssignment(line string) error {
 		return fmt.Errorf("invalid assignment: %s", line)
 	}
 
-	c.compileExpression(expr)
+	if err := c.compileExpression(expr); err != nil {
+		return err
+	}
 
 	if idx, ok := c.localIndex[varName]; ok {
 		c.emit(scripting.OP_POP_LOCAL_VAR, int32(idx))

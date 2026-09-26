@@ -16,7 +16,7 @@ func (c *Compiler) compileMove(line string) error {
 	if m := nowRE.FindStringSubmatch(line); m != nil {
 		pieceName := m[1]
 		axisName := m[2]
-		value := stripAngleBrackets(m[3])
+		value := m[3]
 
 		pieceIdx, err := c.getPieceIndex(pieceName)
 		if err != nil {
@@ -28,7 +28,9 @@ func (c *Compiler) compileMove(line string) error {
 		}
 
 		// Push value onto stack
-		c.compileExpression(value)
+		if err := c.compileOperand(value); err != nil {
+			return err
+		}
 		// Emit MOVE_NOW with piece# and axis# as separate operands
 		c.emit2(scripting.OP_MOVE_NOW, int32(pieceIdx), int32(axisIdx))
 		return nil
@@ -39,8 +41,8 @@ func (c *Compiler) compileMove(line string) error {
 	if m := speedRE.FindStringSubmatch(line); m != nil {
 		pieceName := m[1]
 		axisName := m[2]
-		distance := stripAngleBrackets(m[3])
-		speed := stripAngleBrackets(m[4])
+		distance := m[3]
+		speed := m[4]
 
 		pieceIdx, err := c.getPieceIndex(pieceName)
 		if err != nil {
@@ -52,8 +54,12 @@ func (c *Compiler) compileMove(line string) error {
 		}
 
 		// Push speed first, then distance (stack is LIFO)
-		c.compileExpression(speed)
-		c.compileExpression(distance)
+		if err := c.compileOperand(speed); err != nil {
+			return err
+		}
+		if err := c.compileOperand(distance); err != nil {
+			return err
+		}
 
 		// Emit MOVE with piece# and axis# as separate post-data words
 		c.emit2(scripting.OP_MOVE, int32(pieceIdx), int32(axisIdx))
@@ -72,7 +78,7 @@ func (c *Compiler) compileTurn(line string) error {
 	if m := nowRE.FindStringSubmatch(line); m != nil {
 		pieceName := m[1]
 		axisName := m[2]
-		angle := stripAngleBrackets(m[3])
+		angle := m[3]
 
 		pieceIdx, err := c.getPieceIndex(pieceName)
 		if err != nil {
@@ -84,7 +90,9 @@ func (c *Compiler) compileTurn(line string) error {
 		}
 
 		// Push angle onto stack
-		c.compileExpression(angle)
+		if err := c.compileOperand(angle); err != nil {
+			return err
+		}
 		// Emit TURN_NOW with piece# and axis# as separate operands
 		c.emit2(scripting.OP_TURN_NOW, int32(pieceIdx), int32(axisIdx))
 		return nil
@@ -95,11 +103,8 @@ func (c *Compiler) compileTurn(line string) error {
 	if m := speedRE.FindStringSubmatch(line); m != nil {
 		pieceName := m[1]
 		axisName := m[2]
-		angle := stripAngleBrackets(m[3])
+		angle := m[3]
 		speed := m[4]
-		if speed != "" {
-			speed = stripAngleBrackets(speed)
-		}
 
 		pieceIdx, err := c.getPieceIndex(pieceName)
 		if err != nil {
@@ -112,11 +117,15 @@ func (c *Compiler) compileTurn(line string) error {
 
 		// Stack order: speed pushed first (deeper), then angle (top)
 		if speed != "" {
-			c.compileExpression(speed)
+			if err := c.compileOperand(speed); err != nil {
+				return err
+			}
 		} else {
 			c.emit(scripting.OP_PUSH_CONSTANT, 0)
 		}
-		c.compileExpression(angle)
+		if err := c.compileOperand(angle); err != nil {
+			return err
+		}
 
 		// Emit TURN with piece# and axis# as separate post-data words
 		c.emit2(scripting.OP_TURN, int32(pieceIdx), int32(axisIdx))
@@ -139,10 +148,10 @@ func (c *Compiler) compileSpin(line string) error {
 
 	pieceName := m[1]
 	axisName := m[2]
-	speed := stripAngleBrackets(m[3])
+	speed := m[3]
 	accel := "0"
 	if m[4] != "" {
-		accel = stripAngleBrackets(m[4])
+		accel = m[4]
 	}
 
 	pieceIdx, err := c.getPieceIndex(pieceName)
@@ -155,8 +164,12 @@ func (c *Compiler) compileSpin(line string) error {
 	}
 
 	// Stack order: accelerate pushed first, then speed (LIFO)
-	c.compileExpression(accel)
-	c.compileExpression(speed)
+	if err := c.compileOperand(accel); err != nil {
+		return err
+	}
+	if err := c.compileOperand(speed); err != nil {
+		return err
+	}
 
 	// Emit SPIN with piece# and axis# as separate post-data words
 	c.emit2(scripting.OP_SPIN, int32(pieceIdx), int32(axisIdx))
@@ -178,7 +191,7 @@ func (c *Compiler) compileStopSpin(line string) error {
 	axisName := m[2]
 	decel := "0"
 	if m[3] != "" {
-		decel = stripAngleBrackets(m[3])
+		decel = m[3]
 	}
 
 	pieceIdx, err := c.getPieceIndex(pieceName)
@@ -191,7 +204,9 @@ func (c *Compiler) compileStopSpin(line string) error {
 	}
 
 	// Push deceleration value onto stack
-	c.compileExpression(decel)
+	if err := c.compileOperand(decel); err != nil {
+		return err
+	}
 
 	// Emit STOP_SPIN with piece# and axis# as separate post-data words
 	c.emit2(scripting.OP_STOP_SPIN, int32(pieceIdx), int32(axisIdx))

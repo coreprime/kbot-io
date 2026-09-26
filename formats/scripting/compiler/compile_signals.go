@@ -21,7 +21,9 @@ func (c *Compiler) compileSignal(line string) error {
 	value := m[1]
 
 	// Push value onto stack
-	c.compileExpression(value)
+	if err := c.compileExpression(value); err != nil {
+		return err
+	}
 
 	// Emit SIGNAL
 	c.emit(scripting.OP_SIGNAL, 0)
@@ -42,7 +44,9 @@ func (c *Compiler) compileSetSignalMask(line string) error {
 	value := m[1]
 
 	// Push value onto stack
-	c.compileExpression(value)
+	if err := c.compileExpression(value); err != nil {
+		return err
+	}
 
 	// Emit SET_SIGNAL_MASK
 	c.emit(scripting.OP_SET_SIGNAL_MASK, 0)

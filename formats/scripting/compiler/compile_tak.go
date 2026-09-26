@@ -15,8 +15,10 @@ import (
 //	dont-shadow(<piece>);                  // disables shadowing for a piece
 //	Mission-Command(<sound-name>, <args>); // runs an engine command, dropping result
 //
-// The math intrinsics __tak_math_09 / __tak_math_0b live inside
-// expressions and are handled by compileExpression; see expression.go.
+// The math intrinsics __tak_math_09 / __tak_math_0a / __tak_math_0b live
+// inside expressions and are handled by compileExpression; see
+// expression.go. Mission-Command and the math intrinsics need `.version 6`;
+// dont-shadow compiles for TA as well, which runs it as a no-op.
 //
 // The keyword forms (`dont-shadow`, `Mission-Command`) match Scriptor's
 // canonical TAK BOS dialect, so .bos files produced by `kbot cob decompile`
@@ -44,37 +46,10 @@ func (c *Compiler) compileDontShadow(line string) error {
 // The call always returns a value; when used as a statement we follow with
 // POP_STACK to drop it (matching the original Cavedog bytecode).
 func (c *Compiler) compileMissionCommandStatement(line string) error {
-	if err := c.compileMissionCommandExpr(strings.TrimSuffix(strings.TrimSpace(line), ";")); err != nil {
+	if err := c.compileExpression(strings.TrimSuffix(strings.TrimSpace(line), ";")); err != nil {
 		return err
 	}
 	c.emit(scripting.OP_POP_STACK, 0)
-	return nil
-}
-
-// compileMissionCommandExpr emits the bytecode for a `Mission-Command(name, args...)`
-// expression — push each arg, then emit OP_MISSION_COMMAND with inline
-// (soundNameIndex, argCount). The caller is responsible for either consuming
-// the result (via assignment / POP_*) or wrapping in
-// compileMissionCommandStatement to drop it.
-func (c *Compiler) compileMissionCommandExpr(expr string) error {
-	args, err := stripCallTAK(expr, "Mission-Command")
-	if err != nil {
-		return err
-	}
-	parts := splitParams(args)
-	if len(parts) < 1 {
-		return fmt.Errorf("Mission-Command requires at least the sound-name argument")
-	}
-	cmd := strings.TrimSpace(parts[0])
-	cmdIdx, err := c.takSoundNameIndex(cmd)
-	if err != nil {
-		return err
-	}
-	stackArgs := parts[1:]
-	for _, a := range stackArgs {
-		c.compileExpression(strings.TrimSpace(a))
-	}
-	c.emit2(scripting.OP_MISSION_COMMAND, int32(cmdIdx), int32(len(stackArgs)))
 	return nil
 }
 
