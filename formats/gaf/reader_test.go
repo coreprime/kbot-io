@@ -295,6 +295,39 @@ func TestReadReportsNestedAndSelfReferencingLayers(t *testing.T) {
 	}
 }
 
+// A composite whose only layer was skipped has no Layers once decoded; used
+// later as a layer of another composite it is still a nested composite.
+func TestReadReportsDecodedCompositeUsedAsLayer(t *testing.T) {
+	g := &gafBytes{}
+	g.add(Header{Version: VersionTA, SequenceCount: 1})
+	ptr := g.add(uint32(0))
+	s := g.add(SequenceHeader{FrameCount: 2})
+	items := g.add([]FrameListItem{{Duration: 1}, {Duration: 1}})
+	a := g.add(FrameInfo{Width: 1, Height: 1, TransparencyIndex: 3, LayerCount: 1})
+	aTable := g.add([]uint32{0})
+	b := g.add(FrameInfo{Width: 1, Height: 1, TransparencyIndex: 3, LayerCount: 1})
+	bTable := g.add([]uint32{0})
+	g.set32(ptr, s)
+	g.set32(items, a)
+	g.set32(items+8, b)
+	g.set32(a+frameInfoData, aTable)
+	g.set32(aTable, a) // a's layer is a itself
+	g.set32(b+frameInfoData, bTable)
+	g.set32(bTable, a) // b's layer is the composite a
+
+	seqs, r := readGAF(t, g.b)
+	if f := seqs[0].Frames[0]; len(f.Layers) != 0 {
+		t.Errorf("frame a kept %d layers, want 0", len(f.Layers))
+	}
+	f := seqs[0].Frames[1]
+	if len(f.Layers) != 0 || !bytes.Equal(f.Pixels, []byte{3}) || f.PixelOpaque(0) {
+		t.Errorf("frame b: Layers=%d Pixels=%v, want the composite layer skipped", len(f.Layers), f.Pixels)
+	}
+	if !hasWarning(r, "itself a composite") {
+		t.Errorf("nested composite layer not reported: %v", r.Warnings())
+	}
+}
+
 // Layers are placed by hotspot and clipped to the frame on every side;
 // layers with no width or wholly outside the frame draw nothing.
 func TestReadCompositeClipsLayersByHotspot(t *testing.T) {

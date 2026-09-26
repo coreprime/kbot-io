@@ -165,6 +165,7 @@ type decoder struct {
 	budget     int64             // bytes still allowed to be read or produced
 	records    int               // frame headers visited
 	cache      map[uint32]*Frame // decoded frames by header offset
+	composite  map[uint32]bool   // cached headers whose layer count is non-zero
 	refs       map[uint32]int    // references to each frame header
 	warnings   []Warning
 	suppressed int
@@ -173,10 +174,11 @@ type decoder struct {
 
 func newDecoder(file io.ReadSeeker) *decoder {
 	return &decoder{
-		file:   file,
-		budget: maxDecodedBytes,
-		cache:  make(map[uint32]*Frame),
-		refs:   make(map[uint32]int),
+		file:      file,
+		budget:    maxDecodedBytes,
+		cache:     make(map[uint32]*Frame),
+		composite: make(map[uint32]bool),
+		refs:      make(map[uint32]int),
 	}
 }
 
@@ -282,7 +284,9 @@ func (d *decoder) readFrame(offset uint32, asLayer bool) (*Frame, error) {
 		d.warn(int64(offset), "frame header is referenced more than once; the game cannot load a file that shares frame headers")
 	}
 	if cached, ok := d.cache[offset]; ok {
-		if asLayer && len(cached.Layers) > 0 {
+		// A composite whose layers were all skipped has no Layers, so the
+		// header's layer count decides.
+		if asLayer && d.composite[offset] {
 			d.warn(int64(offset), "layer is itself a composite frame; the game does not draw nested layers, so it was skipped")
 			return nil, nil
 		}
@@ -314,6 +318,9 @@ func (d *decoder) readFrame(offset uint32, asLayer bool) (*Frame, error) {
 		return nil, err
 	}
 	d.cache[offset] = frame
+	if fi.LayerCount > 0 {
+		d.composite[offset] = true
+	}
 	return frame, nil
 }
 
