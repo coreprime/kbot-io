@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"image"
 	"image/png"
+	"math"
 )
 
 // encodeAPNG writes a sequence of equally-sized truecolor RGBA frames as an
@@ -14,6 +15,9 @@ import (
 // data is produced by the stdlib PNG encoder (so compression + filtering match
 // a normal PNG); this only wraps it in the APNG chunk structure (acTL / fcTL /
 // fdAT). With one frame it degrades to a plain PNG.
+//
+// Every frame of an APNG shares the one IHDR, so all frames are encoded with
+// the same colour type: RGB when every frame is opaque, RGBA otherwise.
 func encodeAPNG(frames []*image.RGBA, delayNum, delayDen uint16) ([]byte, error) {
 	if len(frames) == 0 {
 		return nil, fmt.Errorf("no frames")
@@ -28,16 +32,38 @@ func encodeAPNG(frames []*image.RGBA, delayNum, delayDen uint16) ([]byte, error)
 
 	W := frames[0].Bounds().Dx()
 	H := frames[0].Bounds().Dy()
+	for i, fr := range frames[1:] {
+		if fr.Bounds().Dx() != W || fr.Bounds().Dy() != H {
+			return nil, fmt.Errorf("frame %d is %dx%d, frame 0 is %dx%d", i+1, fr.Bounds().Dx(), fr.Bounds().Dy(), W, H)
+		}
+	}
+
+	chunks := make([]pngChunks, len(frames))
+	sameHeader := true
+	for i, fr := range frames {
+		pc, err := encodePNGChunks(fr)
+		if err != nil {
+			return nil, err
+		}
+		chunks[i] = pc
+		sameHeader = sameHeader && bytes.Equal(pc.ihdr, chunks[0].ihdr)
+	}
+	if !sameHeader {
+		// Some frames are opaque and some are not: re-encode all as RGBA.
+		for i, fr := range frames {
+			pc, err := encodePNGChunks(translucentRGBA{fr})
+			if err != nil {
+				return nil, err
+			}
+			chunks[i] = pc
+		}
+	}
 
 	var out bytes.Buffer
 	out.Write([]byte{137, 80, 78, 71, 13, 10, 26, 10}) // PNG signature
 
 	// Frame 0 supplies the IHDR + the default-image IDAT.
-	first, err := encodePNGChunks(frames[0])
-	if err != nil {
-		return nil, err
-	}
-	writeAPNGChunk(&out, "IHDR", first.ihdr)
+	writeAPNGChunk(&out, "IHDR", chunks[0].ihdr)
 
 	actl := make([]byte, 8)
 	binary.BigEndian.PutUint32(actl[0:], uint32(len(frames)))
@@ -60,13 +86,9 @@ func encodeAPNG(frames []*image.RGBA, delayNum, delayDen uint16) ([]byte, error)
 
 	fctl(seq)
 	seq++
-	writeAPNGChunk(&out, "IDAT", first.idat)
+	writeAPNGChunk(&out, "IDAT", chunks[0].idat)
 
-	for _, fr := range frames[1:] {
-		pc, err := encodePNGChunks(fr)
-		if err != nil {
-			return nil, err
-		}
+	for _, pc := range chunks[1:] {
 		fctl(seq)
 		seq++
 		fdat := make([]byte, 4+len(pc.idat))
@@ -78,6 +100,31 @@ func encodeAPNG(frames []*image.RGBA, delayNum, delayDen uint16) ([]byte, error)
 
 	writeAPNGChunk(&out, "IEND", nil)
 	return out.Bytes(), nil
+}
+
+// translucentRGBA is an RGBA image the PNG encoder always writes with an
+// alpha channel, even when every pixel is opaque.
+type translucentRGBA struct{ *image.RGBA }
+
+// Opaque reports false so the encoder keeps the alpha channel.
+func (translucentRGBA) Opaque() bool { return false }
+
+// apngDelay expresses a frame delay in milliseconds as the 16-bit numerator
+// and denominator (a fraction of a second) an fcTL chunk stores, using the
+// finest of 1/1000, 1/100, 1/10 and 1 second that fits.
+func apngDelay(ms int) (num, den uint16) {
+	if ms <= 0 {
+		return 0, 1000
+	}
+	if ms > math.MaxUint16*1000 {
+		return math.MaxUint16, 1
+	}
+	for _, d := range []int{1000, 100, 10, 1} {
+		if n := (ms*d + 500) / 1000; n <= math.MaxUint16 {
+			return uint16(n), uint16(d)
+		}
+	}
+	return math.MaxUint16, 1
 }
 
 type pngChunks struct {

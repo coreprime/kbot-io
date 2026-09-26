@@ -86,6 +86,7 @@ func (m *Model) RenderImage(opts RenderOptions) *image.RGBA {
 // RenderSpinAPNG renders an N-frame 360° spin about the model centre as a
 // truecolor animated PNG. Uses the SAME scale/centre as RenderImage so hovering
 // from the still into the spin doesn't jump. Falls back to a still when n<=1.
+// delayMs is the delay of each frame; 0 or less means 90 ms.
 func (m *Model) RenderSpinAPNG(opts RenderOptions, frames, delayMs int) ([]byte, error) {
 	normalizeOpts(&opts)
 	if frames <= 1 {
@@ -100,11 +101,11 @@ func (m *Model) RenderSpinAPNG(opts RenderOptions, frames, delayMs int) ([]byte,
 		az := rad(opts.AzimuthDeg) + 2*math.Pi*float64(i)/float64(frames)
 		imgs[i] = renderFrame(opts, tris, c, az, el, scale)
 	}
-	num := uint16(delayMs)
-	if num == 0 {
-		num = 90
+	if delayMs <= 0 {
+		delayMs = 90
 	}
-	return encodeAPNG(imgs, num, 1000)
+	num, den := apngDelay(delayMs)
+	return encodeAPNG(imgs, num, den)
 }
 
 // fitScale returns the true-scale pixels-per-unit, shrunk only if the model's

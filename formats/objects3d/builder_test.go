@@ -146,3 +146,27 @@ func encodeTree(top ...*tObj) []byte {
 	linkAll(top)
 	return b.buf
 }
+
+// colouredCube is a cube centred at the origin whose six quads are coloured
+// and wound so that their right-hand-rule normals point outward.
+func colouredCube(s int32) *Object {
+	faces := [][]int{
+		{0, 3, 2, 1}, // -Z
+		{4, 5, 6, 7}, // +Z
+		{0, 1, 5, 4}, // -Y
+		{3, 7, 6, 2}, // +Y
+		{1, 2, 6, 5}, // +X
+		{0, 4, 7, 3}, // -X
+	}
+	o := &Object{
+		Vertices: []Vertex{
+			{-s, -s, -s}, {s, -s, -s}, {s, s, -s}, {-s, s, -s},
+			{-s, -s, s}, {s, -s, s}, {s, s, s}, {-s, s, s},
+		},
+		SelectionPrim: -1,
+	}
+	for _, f := range faces {
+		o.Primitives = append(o.Primitives, Primitive{VertexIndices: f, IsColored: true})
+	}
+	return o
+}
