@@ -45,10 +45,11 @@
 //     opaque black.
 //   - A frame with no pixels reads no data, whatever its data offset.
 //
-// The reader keeps every field it reads, including the words the game does
-// not interpret, so a file can be written back unchanged. It flattens each
-// composite frame into Pixels (clipped to the frame's own rectangle) and also
-// keeps the layers in Frame.Layers.
+// The reader keeps every sequence and frame field it reads, including the
+// words the game does not interpret, so that a rewritten file keeps them (the
+// writer lays the file out afresh and always writes the header version
+// VersionTA). It flattens each composite frame into Pixels (clipped to the
+// frame's own rectangle) and also keeps the layers in Frame.Layers.
 //
 // Some structures the game cannot load are read anyway and reported by
 // Reader.Warnings: a layer that is itself a composite or refers back to its
