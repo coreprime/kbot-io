@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"compress/zlib"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +14,11 @@ import (
 	"github.com/coreprime/kbot-io/formats/hpi/common"
 )
 
-const chunkMaxDecomp = 65536
+const chunkMaxDecomp = common.ChunkBlockSize
+
+// ErrInvalidTrailer is returned by Close when the trailer is not a copyright
+// trailer TA 3.1c accepts and AllowNonGameTrailer is not set.
+var ErrInvalidTrailer = errors.New(`HPI trailer must be the 36 bytes "Copyright ____ Cavedog Entertainment"; TA 3.1c does not mount archives without it`)
 
 // WriterEntry holds a file's metadata and payload for writing into an archive.
 type WriterEntry struct {
@@ -29,23 +35,46 @@ type WriterEntry struct {
 }
 
 // Writer builds a Total Annihilation (v1) HPI archive.
+//
+// Paths are '/'- or '\'-separated. Directories are merged ignoring ASCII
+// letter case, keeping the first spelling added, as the game looks names up
+// case-insensitively. Adding a second file whose path differs only in letter
+// case keeps both records; the game reads the one added last. Warnings lists
+// such collisions.
+//
+// File data is written in the order files were added, and every record points
+// at its own data.
 type Writer struct {
-	file              *os.File
-	entries           []WriterEntry
-	trailer           []byte
-	CompressionLevel  int   // zlib level (0–9); 0 means default
-	CompressionMethod uint8 // 0=none, 1=LZ77, 2=zlib (default)
+	file    *os.File
+	entries []WriterEntry
+	trailer []byte
+	err     error // first error from a call without an error result
+
+	CompressionLevel int // zlib level (0–9); 0 means default
+
+	// CompressionMethod selects how AddFile and AddFileFromBytes store data:
+	// common.CompressionNone (0) stores it uncompressed, common.CompressionLZ77
+	// (1, the CreateWriter default) and common.CompressionZLib (2) split it
+	// into 64 KiB chunks compressed with that algorithm. Other values are
+	// refused. A chunked entry never contains a stored (type 0) SQSH chunk,
+	// which the game refuses.
+	CompressionMethod uint8
 
 	// HeaderKey is the raw HeaderKey value stored in the HPI header. The
 	// reader transforms it into the per-byte XOR key used for the directory
-	// and chunk regions. A value of 0 disables encryption. Defaults to
-	// common.DefaultHeaderKey when the writer is created via CreateWriter.
+	// and chunk regions. A value of 0 or 0xFF disables encryption. Defaults
+	// to common.DefaultHeaderKey when the writer is created via CreateWriter.
 	HeaderKey uint8
 
 	// ChunkEncoded controls whether each SQSH chunk's compressed payload is
 	// run through the per-position add/XOR transform. Defaults to true,
 	// matching every chunk shipped in retail TA archives.
 	ChunkEncoded bool
+
+	// AllowNonGameTrailer lets Close write a trailer set with SetTrailer that
+	// is not a valid Cavedog copyright trailer, including none at all. TA 3.1c
+	// does not mount such archives; kbot-io's reader still opens them.
+	AllowNonGameTrailer bool
 }
 
 // CreateWriter creates a new v1 HPI archive at the given path. The writer is
@@ -67,7 +96,11 @@ func CreateWriter(path string) (*Writer, error) {
 	}, nil
 }
 
-// SetTrailer sets optional trailing bytes appended after the file data section.
+// SetTrailer sets the bytes appended after the file data section. TA 3.1c
+// mounts an archive only when its last 36 bytes read "Copyright ____ Cavedog
+// Entertainment" (any four year characters; see common.Trailer), so Close
+// fails with ErrInvalidTrailer for any other value unless AllowNonGameTrailer
+// is set.
 func (w *Writer) SetTrailer(data []byte) {
 	w.trailer = append([]byte(nil), data...)
 }
@@ -82,14 +115,20 @@ func (w *Writer) AddFile(archivePath, filePath string) error {
 }
 
 // AddFileFromBytes adds a file from an in-memory byte slice. The compression
-// method used is determined by the Writer's CompressionMethod field.
+// method used is determined by the Writer's CompressionMethod field. The path
+// must pass common.CleanArchivePath: no empty, "." or ".." segments and no
+// name longer than common.MaxNameLength bytes.
 func (w *Writer) AddFileFromBytes(archivePath string, data []byte) error {
 	method := w.CompressionMethod
-	if method == 0 {
-		method = common.CompressionLZ77
+	if method > common.CompressionZLib {
+		return fmt.Errorf("unsupported compression method %d (use 0 none, 1 LZ77 or 2 zlib)", method)
+	}
+	p, err := common.CleanArchivePath(archivePath)
+	if err != nil {
+		return err
 	}
 	w.entries = append(w.entries, WriterEntry{
-		Path:       filepath.ToSlash(archivePath),
+		Path:       p,
 		Data:       data,
 		DecompSize: uint32(len(data)),
 		CompType:   method,
@@ -97,11 +136,21 @@ func (w *Writer) AddFileFromBytes(archivePath string, data []byte) error {
 	return nil
 }
 
-// AddRawEntry adds a pre-compressed file entry whose chunk payload will be
-// written verbatim. Used for lossless round-trips.
+// AddRawEntry adds a file entry whose data will be written verbatim, as
+// returned by Reader.ReadRawFileData. compType is the file record's
+// compression byte: 0 for stored data, any other value for a chunk-size table
+// followed by chunks. Used for lossless round-trips. An invalid path makes
+// Close fail.
 func (w *Writer) AddRawEntry(archivePath string, rawChunks []byte, decompSize uint32, compType uint8) {
+	p, err := common.CleanArchivePath(archivePath)
+	if err != nil {
+		if w.err == nil {
+			w.err = err
+		}
+		return
+	}
 	w.entries = append(w.entries, WriterEntry{
-		Path:             filepath.ToSlash(archivePath),
+		Path:             p,
 		RawChunks:        rawChunks,
 		DecompSize:       decompSize,
 		CompType:         compType,
@@ -131,6 +180,16 @@ func (w *Writer) AddDirectory(archivePath, dirPath string) error {
 	})
 }
 
+// Warnings describes paths added so far that collide when names are compared
+// the way the game compares them (ignoring ASCII letter case): two files with
+// the same path, where the game reads only the one added last, and a file
+// that shares its name with a directory, where the one added last hides the
+// other.
+func (w *Writer) Warnings() []string {
+	_, warnings := buildTree(w.entries)
+	return warnings
+}
+
 // Close finalises the archive and closes the underlying file.
 func (w *Writer) Close() error {
 	if err := w.writeArchive(); err != nil {
@@ -156,9 +215,11 @@ type fileNode struct {
 	entryIndex int // index into Writer.entries
 }
 
+// findOrCreateChild returns the child directory whose name equals name
+// ignoring ASCII letter case, creating it with this spelling if none exists.
 func (d *dirNode) findOrCreateChild(name string) *dirNode {
 	for _, c := range d.children {
-		if c.name == name {
+		if common.EqualFoldASCII(c.name, name) {
 			return c
 		}
 	}
@@ -174,17 +235,48 @@ func (d *dirNode) addFile(name string, idx int) {
 	d.ordered = append(d.ordered, fn)
 }
 
-func buildTree(entries []WriterEntry) *dirNode {
+func (d *dirNode) hasFile(name string) bool {
+	for _, f := range d.files {
+		if common.EqualFoldASCII(f.name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *dirNode) hasDir(name string) bool {
+	for _, c := range d.children {
+		if common.EqualFoldASCII(c.name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// buildTree arranges the entries into directories and reports name
+// collisions.
+func buildTree(entries []WriterEntry) (*dirNode, []string) {
 	root := &dirNode{}
+	var warnings []string
 	for i, e := range entries {
 		parts := strings.Split(e.Path, "/")
 		cur := root
-		for _, p := range parts[:len(parts)-1] {
+		for j, p := range parts[:len(parts)-1] {
+			if cur.hasFile(p) {
+				warnings = append(warnings, fmt.Sprintf("%s: directory %q shares its name with a file", e.Path, strings.Join(parts[:j+1], "/")))
+			}
 			cur = cur.findOrCreateChild(p)
 		}
-		cur.addFile(parts[len(parts)-1], i)
+		name := parts[len(parts)-1]
+		switch {
+		case cur.hasFile(name):
+			warnings = append(warnings, fmt.Sprintf("%s: path added more than once (ignoring letter case); the game reads the last copy", e.Path))
+		case cur.hasDir(name):
+			warnings = append(warnings, fmt.Sprintf("%s: file shares its name with a directory", e.Path))
+		}
+		cur.addFile(name, i)
 	}
-	return root
+	return root, warnings
 }
 
 // ---------------------------------------------------------------------------
@@ -222,8 +314,9 @@ func dirSize(d *dirNode) int {
 
 // serializeDir writes the directory subtree into buf starting at buf[base].
 // absBase is the absolute file offset that corresponds to buf[base]; all
-// pointers written into the buffer use absolute file offsets.
-func serializeDir(buf []byte, base int, absBase int, d *dirNode, fileOffsets []uint32, currentFileDataOffset *uint32, entries []WriterEntry, chunkSizes []int) {
+// pointers written into the buffer use absolute file offsets. fileOffsets
+// holds each entry's data offset, assigned before serialization.
+func serializeDir(buf []byte, base int, absBase int, d *dirNode, fileOffsets []uint32, entries []WriterEntry) {
 	n := uint32(len(d.ordered))
 	entryListOff := absBase + 8
 
@@ -248,19 +341,15 @@ func serializeDir(buf []byte, base int, absBase int, d *dirNode, fileOffsets []u
 			dataRecBuf := payloadBuf
 			e := entries[v.entryIndex]
 
-			binary.LittleEndian.PutUint32(buf[dataRecBuf:], *currentFileDataOffset)
+			binary.LittleEndian.PutUint32(buf[dataRecBuf:], fileOffsets[v.entryIndex])
 			binary.LittleEndian.PutUint32(buf[dataRecBuf+4:], e.DecompSize)
 			buf[dataRecBuf+8] = e.CompType
 			payloadBuf += 9
 			payloadAbs += 9
 
-			rawLen := chunkSizes[v.entryIndex]
-			fileOffsets[v.entryIndex] = *currentFileDataOffset
-			*currentFileDataOffset += uint32(rawLen)
-
 			binary.LittleEndian.PutUint32(buf[entryBuf:], uint32(nameAbs))
 			binary.LittleEndian.PutUint32(buf[entryBuf+4:], uint32(dataRecAbs))
-			buf[entryBuf+8] = 0
+			buf[entryBuf+8] = common.EntryTypeFile
 
 		case *dirNode:
 			nameAbs := payloadAbs
@@ -274,9 +363,9 @@ func serializeDir(buf []byte, base int, absBase int, d *dirNode, fileOffsets []u
 
 			binary.LittleEndian.PutUint32(buf[entryBuf:], uint32(nameAbs))
 			binary.LittleEndian.PutUint32(buf[entryBuf+4:], uint32(childAbs))
-			buf[entryBuf+8] = 1
+			buf[entryBuf+8] = common.EntryTypeDirectory
 
-			serializeDir(buf, childBuf, childAbs, v, fileOffsets, currentFileDataOffset, entries, chunkSizes)
+			serializeDir(buf, childBuf, childAbs, v, fileOffsets, entries)
 			subtreeSize := dirSize(v)
 			payloadBuf = childBuf + subtreeSize
 			payloadAbs = childAbs + subtreeSize
@@ -285,16 +374,17 @@ func serializeDir(buf []byte, base int, absBase int, d *dirNode, fileOffsets []u
 }
 
 // buildChunks compresses data into the HPI chunk format (size table + SQSH
-// chunk headers + payloads). compType selects the algorithm (LZ77 or zlib).
+// chunk headers + payloads). compType selects the algorithm (LZ77 or zlib);
+// stored entries never go through here, so no chunk is ever SQSH type 0.
 // level is the zlib compression level; values ≤0 use zlib.DefaultCompression.
 // When chunkEncoded is true the compressed bytes of each chunk are run through
 // the chunk transform before the checksum is computed, and the chunk header's
 // "encoded" byte is set so the reader applies the inverse pass.
+//
+// An empty file has no chunks: the chunk count is ceil(size/65536), which is
+// what readers derive from the file record.
 func buildChunks(data []byte, compType uint8, level int, chunkEncoded bool) []byte {
-	numChunks := len(data) / chunkMaxDecomp
-	if len(data)%chunkMaxDecomp != 0 || numChunks == 0 {
-		numChunks++
-	}
+	numChunks := (len(data) + chunkMaxDecomp - 1) / chunkMaxDecomp
 
 	type chunk struct {
 		compressed []byte
@@ -370,37 +460,54 @@ func buildChunks(data []byte, compType uint8, level int, chunkEncoded bool) []by
 // ---------------------------------------------------------------------------
 
 func (w *Writer) writeArchive() error {
+	if w.err != nil {
+		return w.err
+	}
 	if len(w.entries) == 0 {
 		return fmt.Errorf("no entries to write")
 	}
+	if !w.AllowNonGameTrailer && !common.ValidTrailer(w.trailer) {
+		return ErrInvalidTrailer
+	}
 
-	chunkBlobs := make([][]byte, len(w.entries))
+	blobs := make([][]byte, len(w.entries))
 	for i, e := range w.entries {
-		if e.IsRawPassthrough {
-			chunkBlobs[i] = e.RawChunks
-		} else {
-			chunkBlobs[i] = buildChunks(e.Data, e.CompType, w.CompressionLevel, w.ChunkEncoded)
+		switch {
+		case e.IsRawPassthrough:
+			blobs[i] = e.RawChunks
+		case e.CompType == common.CompressionNone:
+			blobs[i] = e.Data
+		default:
+			blobs[i] = buildChunks(e.Data, e.CompType, w.CompressionLevel, w.ChunkEncoded)
 		}
 	}
 
-	tree := buildTree(w.entries)
+	tree, _ := buildTree(w.entries)
 	dirSectionSize := dirSize(tree)
-	fileDataStart := uint32(common.HeaderSize + dirSectionSize)
+	fileDataStart := uint64(common.HeaderSize + dirSectionSize)
 
-	chunkSizes := make([]int, len(w.entries))
-	for i := range chunkBlobs {
-		chunkSizes[i] = len(chunkBlobs[i])
+	// Data is laid out in the order the files were added, and each record
+	// points at its own data.
+	fileOffsets := make([]uint32, len(w.entries))
+	next := fileDataStart
+	for i, blob := range blobs {
+		if next > math.MaxUint32 {
+			return fmt.Errorf("archive exceeds 4 GiB at %s", w.entries[i].Path)
+		}
+		fileOffsets[i] = uint32(next)
+		next += uint64(len(blob))
+	}
+	if next+uint64(len(w.trailer)) > math.MaxUint32 {
+		return fmt.Errorf("archive exceeds 4 GiB")
 	}
 
 	dirBuf := make([]byte, dirSectionSize)
-	fileOffsets := make([]uint32, len(w.entries))
-	fdOffset := fileDataStart
-	serializeDir(dirBuf, 0, common.HeaderSize, tree, fileOffsets, &fdOffset, w.entries, chunkSizes)
+	serializeDir(dirBuf, 0, common.HeaderSize, tree, fileOffsets, w.entries)
 
 	hdr := common.Header{
 		Marker:        common.HeaderMarker,
 		Version:       common.VersionV1,
-		DirectorySize: fileDataStart,
+		DirectorySize: uint32(fileDataStart),
 		DecryptKey:    uint32(w.HeaderKey),
 		Offset:        uint32(common.HeaderSize),
 	}
@@ -417,8 +524,7 @@ func (w *Writer) writeArchive() error {
 	}
 	offset += int64(len(dirBuf))
 
-	for i := range w.entries {
-		blob := chunkBlobs[i]
+	for i, blob := range blobs {
 		if xorKey != 0 {
 			enc := make([]byte, len(blob))
 			copy(enc, blob)
