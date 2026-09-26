@@ -23,7 +23,11 @@ package tdf
 //   - Order and spelling. Keys and sections are written in the order they were
 //     read, with the key spelling of the source; keys the source did not have
 //     follow in struct order. Entries of a map-typed section (such as
-//     [DAMAGE]) keep their order and text too.
+//     [DAMAGE]) keep their order and text too, and sections nested in it,
+//     which the map cannot hold, are kept and written back unchanged.
+//   - Origin. Decoded reports whether the Meta was filled from a source, so
+//     Marshal can tell a decoded struct that lacked a key from one built in
+//     code (see the repeats= tag option).
 //
 // Pointer fields give presence without Meta: a nil pointer is absent and a
 // non-nil one is written whatever its value. Meta adds presence to plain
@@ -36,6 +40,7 @@ package tdf
 type Meta struct {
 	entries []metaEntry
 	fields  map[string]int // folded field key -> index into entries
+	decoded bool           // filled by decoding a section
 }
 
 type metaEntry struct {
@@ -43,7 +48,15 @@ type metaEntry struct {
 	raw     string // value text of the last assignment (fields)
 	hasRaw  bool
 	section bool
-	sub     *Meta // entries of a section decoded into a map
+	sub     *Meta    // entries of a section decoded into a map
+	el      *element // a section nested in a map-typed section, kept whole
+}
+
+// Decoded reports whether Unmarshal or a Decoder filled the Meta from a
+// section of source text. It is false for the zero Meta of a struct built in
+// code.
+func (m *Meta) Decoded() bool {
+	return m != nil && m.decoded
 }
 
 // Present reports whether the source had a field with this key (compared

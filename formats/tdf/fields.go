@@ -41,6 +41,7 @@ type structSpec struct {
 	nameIndex      []int
 	remainingIndex []int
 	sectionsIndex  []int
+	sectionsStem   string // tag key of the ,sections field: names unnamed elements
 	metaIndex      []int
 	countKeys      map[string]bool // folded sibling count keys managed by repeats= fields
 }
@@ -125,6 +126,7 @@ func collectFields(t reflect.Type, prefix []int, s *structSpec) {
 		}
 		if fs.isSections {
 			s.sectionsIndex = fs.index
+			s.sectionsStem = fs.key
 		}
 		if fs.isMeta {
 			if f.Type != metaType && f.Type != reflect.PointerTo(metaType) {

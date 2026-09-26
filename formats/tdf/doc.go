@@ -107,7 +107,10 @@
 // Writers refuse keys, values and section names the grammar cannot carry
 // (see CheckKey, CheckValue and CheckName): the grammar has no escaping, so a
 // ';' in a value, a "//" in a URL or a ']' in a section name would change what
-// the game reads.
+// the game reads. An element of a repeated-section field, or of a catch-all
+// tagged with a stem such as `tdf:"special,sections"`, whose name field is
+// empty is written under a generated name that no sibling uses (see
+// ElementNames), never as an unnamed [] section.
 //
 // # Comparing and rewriting
 //

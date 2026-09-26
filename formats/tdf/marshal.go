@@ -148,22 +148,15 @@ func encodeStruct(rv reflect.Value) ([]*element, error) {
 			// A repeats= field emits a sibling count key (e.g. SCHEMACOUNT=2)
 			// ahead of the blocks, matching the on-disk layout.
 			if fs.countKey != "" {
-				key := fs.countKey
-				if e := enc.meta.field(key); e != nil {
-					key = e.key
+				if el := enc.count(fs.countKey, f.Len()); el != nil {
+					out = append(out, el)
 				}
-				out = append(out, &element{key: key, value: strconv.Itoa(f.Len())})
 			}
-			for i := 0; i < f.Len(); i++ {
-				el, err := encodeElement(f.Index(i))
-				if err != nil {
-					return nil, err
-				}
-				if el.key == "" {
-					el.key = fmt.Sprintf("%s%d", fs.key, i)
-				}
-				out = append(out, el)
+			els, err := encodeElements(f, fs.key)
+			if err != nil {
+				return nil, err
 			}
+			out = append(out, els...)
 		case catMap:
 			if f.IsNil() {
 				continue
@@ -184,14 +177,11 @@ func encodeStruct(rv reflect.Value) ([]*element, error) {
 	}
 
 	if spec.sectionsIndex != nil {
-		f := rv.FieldByIndex(spec.sectionsIndex)
-		for i := 0; i < f.Len(); i++ {
-			el, err := encodeElement(f.Index(i))
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, el)
+		els, err := encodeElements(rv.FieldByIndex(spec.sectionsIndex), spec.sectionsStem)
+		if err != nil {
+			return nil, err
 		}
+		out = append(out, els...)
 	}
 
 	if enc.remaining.IsValid() && !enc.remaining.IsNil() {
@@ -205,6 +195,82 @@ func encodeStruct(rv reflect.Value) ([]*element, error) {
 		}
 	}
 	return orderByMeta(out, enc.meta), nil
+}
+
+// encodeElements renders the elements of a repeated-section field or a
+// `,sections` catch-all, naming unnamed ones as ElementNames does.
+func encodeElements(f reflect.Value, stem string) ([]*element, error) {
+	out := make([]*element, f.Len())
+	names := make([]string, f.Len())
+	for i := range out {
+		el, err := encodeElement(f.Index(i))
+		if err != nil {
+			return nil, err
+		}
+		out[i], names[i] = el, el.key
+	}
+	for i, name := range ElementNames(stem, names) {
+		out[i].key = name
+	}
+	return out, nil
+}
+
+// ElementNames returns the section names Marshal writes for the elements of a
+// repeated-section field, or of a `,sections` catch-all, whose tag key is
+// stem, given the names the elements hold (their `,name` fields) in order.
+// An element with a name keeps it. An unnamed element is named stem followed
+// by the lowest number that gives a name no other element of the field has
+// (compared ignoring ASCII case), taking the unnamed elements in order: three
+// unnamed elements of `tdf:"special,sections"` are written as [special0],
+// [special1] and [special2], and an unnamed one next to [Schema 0] of
+// `tdf:"Schema "` as [Schema 1]. With an empty stem an unnamed element stays
+// unnamed and is written as [].
+func ElementNames(stem string, names []string) []string {
+	out := append([]string(nil), names...)
+	if stem == "" {
+		return out
+	}
+	used := map[string]bool{}
+	for _, n := range names {
+		if n != "" {
+			used[foldKey(n)] = true
+		}
+	}
+	next := 0
+	for i, n := range out {
+		if n != "" {
+			continue
+		}
+		for used[foldKey(stem+strconv.Itoa(next))] {
+			next++
+		}
+		out[i] = stem + strconv.Itoa(next)
+		used[foldKey(out[i])] = true
+		next++
+	}
+	return out
+}
+
+// count returns the count key a repeats= field writes, or nil. A struct with a
+// catch-all writes the key from there, as it stands, when it holds one; a
+// struct without one writes the text its Meta recorded. Otherwise the key is
+// written with the number of elements, unless the struct was decoded from a
+// source that had no such key.
+func (enc *encoder) count(key string, n int) *element {
+	if enc.remaining.IsValid() {
+		if _, ok := enc.remKeys[foldKey(key)]; ok {
+			return nil
+		}
+	} else if e := enc.meta.field(key); e != nil && e.hasRaw {
+		return &element{key: e.key, value: e.raw}
+	}
+	if enc.meta.Decoded() {
+		return nil
+	}
+	if e := enc.meta.field(key); e != nil {
+		key = e.key
+	}
+	return &element{key: key, value: strconv.Itoa(n)}
 }
 
 // sectionName is the spelling to write for a single section: the source's
@@ -268,10 +334,20 @@ func (enc *encoder) scalar(fs fieldSpec, f reflect.Value, list bool) (*element, 
 // encodeMap renders a map-typed section. With a Meta for the section, keys it
 // recorded come first in source order and unchanged values keep their text;
 // other keys follow sorted.
+//
+// Sections nested in the source section, which a map cannot hold, are kept in
+// sub and written back unchanged in their place.
 func encodeMap(f reflect.Value, sub *Meta) ([]*element, error) {
 	keys := f.MapKeys()
 	sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
 	out := make([]*element, 0, len(keys))
+	if sub != nil {
+		for _, e := range sub.entries {
+			if e.section && e.el != nil {
+				out = append(out, e.el)
+			}
+		}
+	}
 	for _, k := range keys {
 		v := f.MapIndex(k)
 		if e := sub.field(k.String()); e != nil && e.hasRaw {

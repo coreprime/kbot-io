@@ -25,13 +25,25 @@ import (
 //   - struct / *struct: a nested [name]{ } section
 //   - []struct: repeated [name]{ } sections (matched by exact name, or by name
 //     prefix when several share a stem like GADGET0, GADGET1); Marshal names
-//     an element whose name field is empty with the tag key and its index, and
-//     a trailing space in the key is kept, so `tdf:"Schema "` reads and
-//     writes [Schema 0], [Schema 1], ...
-//   - map[string]scalar: a section whose keys are dynamic (e.g. [DAMAGE])
+//     an element whose name field is empty with the tag key and a number (see
+//     ElementNames), and a trailing space in the key is kept, so
+//     `tdf:"Schema "` reads and writes [Schema 0], [Schema 1], ...
+//   - map[string]scalar: a section whose keys are dynamic (e.g. [DAMAGE]);
+//     with a Meta on the enclosing struct, sections nested in it are kept
+//     whole and written back
 //   - map[string]string tagged `,remaining`: catch-all for unmatched keys
-//   - []struct tagged `,sections`: catch-all for unmatched child sections
+//   - []struct tagged `,sections`: catch-all for unmatched child sections.
+//     A tag key, as in `tdf:"special,sections"`, does not change what the
+//     field matches: Marshal uses it to name unnamed elements the way a
+//     repeated-section field does, [special0], [special1], ...
 //   - Meta tagged `,meta`: records presence, order and text (see Meta)
+//
+// The repeats= option names a sibling count key for a repeated-section field,
+// as in `tdf:"Schema ,repeats=SCHEMACOUNT"`. A struct with a Meta keeps the
+// key as read, in its catch-all, and writes it back unchanged (or not at all
+// when the source had none); a struct built in code writes the number of
+// elements; a struct without a Meta drops the key when decoding and always
+// writes the number of elements.
 //
 // Keys and section names match ignoring ASCII case. A key assigned more than
 // once keeps its last value, whatever the case of each assignment, as in the
@@ -103,7 +115,7 @@ func decodeStruct(children []*element, rv reflect.Value) error {
 	}
 	if st.spec.metaIndex != nil {
 		st.meta = metaTarget(rv.FieldByIndex(st.spec.metaIndex))
-		*st.meta = Meta{}
+		*st.meta = Meta{decoded: true}
 	}
 
 	for _, child := range children {
@@ -186,9 +198,10 @@ func (st *decodeState) field(child *element) error {
 		}
 	}
 	// A repeats= count key (e.g. SCHEMACOUNT) is derived from the slice length
-	// on marshal, so drop it here instead of leaking it into the catch-all,
-	// which would otherwise emit it twice.
-	if st.spec.countKeys[foldKey(child.key)] {
+	// on marshal, so a struct without a Meta drops it here instead of leaking
+	// it into the catch-all, which would otherwise emit it twice. A struct
+	// with a Meta keeps it as read, like any other key.
+	if st.meta == nil && st.spec.countKeys[foldKey(child.key)] {
 		return nil
 	}
 	if st.remaining.IsValid() {
@@ -227,7 +240,7 @@ func (st *decodeState) section(child *element) error {
 		}
 		var sub *Meta
 		if entry >= 0 {
-			sub = &Meta{}
+			sub = &Meta{decoded: true}
 			st.meta.entries[entry].sub = sub
 		}
 		return decodeMap(child, f, sub)
@@ -282,7 +295,8 @@ func sectionTarget(f reflect.Value) reflect.Value {
 
 // decodeMap fills a map field from a section's fields. Case variants of a key
 // merge into one entry holding the last value, spelled as first written.
-// sub, when set, records the section's keys, order and text.
+// sub, when set, records the section's keys, order and text, and keeps the
+// sections nested in it whole; without it they are dropped.
 func decodeMap(child *element, f reflect.Value, sub *Meta) error {
 	if f.IsNil() {
 		f.Set(reflect.MakeMap(f.Type()))
@@ -294,6 +308,10 @@ func decodeMap(child *element, f reflect.Value, sub *Meta) error {
 	}
 	for _, c := range child.children {
 		if c.section {
+			if sub != nil {
+				i := sub.recordSection(c.key)
+				sub.entries[i].el = c
+			}
 			continue
 		}
 		ev := reflect.New(vt).Elem()
