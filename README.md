@@ -100,7 +100,8 @@ cannot hold. The resolvers follow the game's lookups:
 
 Decoded names are written back as they were. Entries built in code without
 a name get one no sibling uses (`[special0]`, `[unit0]`, `[feature0]`,
-`[MENUENTRY0]`, ...), never an unnamed `[]` section.
+`[MENUENTRY0]`, ...), never an unnamed `[]` section. Sections nested in a
+weapon's `[DAMAGE]`, which the game ignores, are kept and written back.
 
 `Check` methods and functions report what the game ignores or reads
 differently: text longer than its buffers, values outside the bits it keeps,

@@ -105,6 +105,22 @@ func TestWeaponIDStaysAbsent(t *testing.T) {
 	}
 }
 
+// A section nested in [DAMAGE], which the game ignores, survives a round trip
+// and an edit of the damage values.
+func TestWeaponKeepsSectionsNestedInDamage(t *testing.T) {
+	const src = `[W]{ID=1;[DAMAGE]{default=1;[X]{a=1;}armcom=5;}}`
+	ws := decodeWeapons(t, src)
+	if len(ws[0].Damage) != 2 {
+		t.Fatalf("damage: %v", ws[0].Damage)
+	}
+	roundTrips(t, src, ws)
+	ws[0].Damage["armcom"] = 7
+	out := marshal(t, ws)
+	if !strings.Contains(out, "[X]") || !strings.Contains(out, "a=1;") || !strings.Contains(out, "armcom=7;") {
+		t.Errorf("after an edit:\n%s", out)
+	}
+}
+
 func TestWeaponTableFollowsTheGame(t *testing.T) {
 	long := strings.Repeat("L", 35)
 	first := decodeWeapons(t, `[LASER]{ID=3;range=100;}

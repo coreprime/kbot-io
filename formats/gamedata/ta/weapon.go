@@ -155,8 +155,8 @@ type Weapon struct {
 	// Values read with Atol, so "13O" is 13 and a bad value never fails the
 	// file; Meta keeps each entry's text and order. The game keys entries
 	// by unit name and keeps each value to 16 bits (see EffectiveDamage).
-	// It ignores sections nested in [DAMAGE], and so does this map: they
-	// are not kept.
+	// It ignores sections nested in [DAMAGE]. The map cannot hold them, so
+	// the Meta keeps them and Marshal writes them back unchanged, in place.
 	Damage map[string]int `tdf:"damage,omitempty"`
 }
 
