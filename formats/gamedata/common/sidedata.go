@@ -1,5 +1,7 @@
 package common
 
+import "github.com/coreprime/kbot-io/formats/tdf"
+
 // SideBase is the set of [SIDEn] fields common to TA and TA:Kingdoms
 // gamedata/sidedata.tdf entries: the playable side's display identity.
 // Game-specific Side types embed it and add their own art, audio and HUD fields.
@@ -12,6 +14,10 @@ type SideBase struct {
 
 	// Remaining preserves every other key=value so the file round-trips.
 	Remaining map[string]string `tdf:",remaining"`
+
+	// Meta records which keys the source had, in what order and with what
+	// text, so an explicit zero survives a round trip (see tdf.Meta).
+	Meta tdf.Meta `tdf:",meta"`
 }
 
 // Side is the read interface satisfied by every game's side type via its

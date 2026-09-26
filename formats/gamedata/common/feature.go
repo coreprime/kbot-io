@@ -4,7 +4,17 @@
 // own fields. A matching interface (Feature, Weapon, UnitInfo, GlobalHeader)
 // exposes the shared fields as getters so callers can treat either game's value
 // uniformly, and the embedding types assert conformance at compile time.
+//
+// Every base carries a tdf.Meta (field Meta), which records which keys the
+// source had, in what order and with what text. A key that was present is
+// written back even when its field is zero, so an explicit 0 never turns into
+// the game's own default for a missing key, and Meta.Present tells the two
+// apart. Remaining and Sections keep the keys and sections a struct does not
+// model, so a round trip changes nothing a game reads. Warning is the report
+// type of the Check functions in this and the game packages.
 package common
+
+import "github.com/coreprime/kbot-io/formats/tdf"
 
 // FeatureBase is the set of feature fields common to TA and TA:Kingdoms
 // features/*.tdf entries. Game-specific feature types embed it.
@@ -28,9 +38,12 @@ type FeatureBase struct {
 	SeqNameDie  string `tdf:"seqnamedie,omitempty"`
 	Object      string `tdf:"object,omitempty"`
 
-	HitDensity float64 `tdf:"hitdensity,omitempty"` // Assuming float, due to name/usage
-	Metal      float64 `tdf:"metal,omitempty"`      // Assuming float, due to name/usage
-	Energy     float64 `tdf:"energy,omitempty"`     // Assuming float, due to name/usage
+	// HitDensity, Metal and Energy hold the value as Atof reads it. TA 3.1c
+	// reads metal and energy as integers kept to 16 bits (see
+	// ta.Feature.EffectiveMetal).
+	HitDensity float64 `tdf:"hitdensity,omitempty"`
+	Metal      float64 `tdf:"metal,omitempty"`
+	Energy     float64 `tdf:"energy,omitempty"`
 	Damage     int     `tdf:"damage,omitempty"`
 
 	Blocking       int `tdf:"blocking,omitempty"`
@@ -60,6 +73,13 @@ type FeatureBase struct {
 
 	// Remaining preserves every other key=value so the file round-trips.
 	Remaining map[string]string `tdf:",remaining"`
+
+	// Sections preserves any section nested in the feature's section.
+	Sections []Section `tdf:",sections"`
+
+	// Meta records which keys the source had, in what order and with what
+	// text, so an explicit zero survives a round trip (see tdf.Meta).
+	Meta tdf.Meta `tdf:",meta"`
 }
 
 // Feature is the read interface satisfied by every game's feature type via its

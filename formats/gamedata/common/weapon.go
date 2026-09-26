@@ -1,5 +1,7 @@
 package common
 
+import "github.com/coreprime/kbot-io/formats/tdf"
+
 // WeaponBase is the set of weapon fields common to TA and TA:Kingdoms. The
 // per-target Damage map differs in element type between the games (TA uses
 // integer points, TA:Kingdoms uses fractional multipliers) and so stays on the
@@ -10,16 +12,24 @@ type WeaponBase struct {
 	Name              string  `tdf:"name,omitempty"`
 	Range             int     `tdf:"range,omitempty"`
 	ReloadTime        float64 `tdf:"reloadtime,omitempty"`
-	WeaponVelocity    float64 `tdf:"weaponvelocity,omitempty"` // Assuming float, due to name/usage
+	WeaponVelocity    float64 `tdf:"weaponvelocity,omitempty"`
 	AreaOfEffect      int     `tdf:"areaofeffect,omitempty"`
 	EdgeEffectiveness float64 `tdf:"edgeeffectiveness,omitempty"`
-	FireStarter       float64 `tdf:"firestarter,omitempty"` // Assuming float, due to percentage usage
+	FireStarter       float64 `tdf:"firestarter,omitempty"`
 	TurnRate          int     `tdf:"turnrate,omitempty"`
 	Model             string  `tdf:"model,omitempty"`
 	SoundHit          string  `tdf:"soundhit,omitempty"`
 
 	// Remaining preserves every other key=value so the file round-trips.
 	Remaining map[string]string `tdf:",remaining"`
+
+	// Sections preserves the sections nested in the weapon's section that no
+	// typed field takes, in order.
+	Sections []Section `tdf:",sections"`
+
+	// Meta records which keys the source had, in what order and with what
+	// text, so an explicit zero survives a round trip (see tdf.Meta).
+	Meta tdf.Meta `tdf:",meta"`
 }
 
 // Weapon is the read interface satisfied by every game's weapon type via its

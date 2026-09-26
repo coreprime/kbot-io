@@ -1,9 +1,14 @@
 package common
 
+import "github.com/coreprime/kbot-io/formats/tdf"
+
 // MovementClassBase is the set of movement-class fields common to TA and
 // TA:Kingdoms. A moveinfo.tdf file is a document of sibling [CLASSn] sections,
 // each describing a terrain-traversal profile that units reference by Name.
 // Fields unique to one game live on that game's MovementClass type.
+//
+// The fields hold the values as written; a key the section leaves out reads
+// as 0 here, while TA 3.1c gives it a default (see ta.MovementClass.Limits).
 type MovementClassBase struct {
 	Key string `tdf:",name"` // section header, e.g. CLASS0
 
@@ -19,6 +24,13 @@ type MovementClassBase struct {
 
 	// Remaining preserves every other key=value so the file round-trips.
 	Remaining map[string]string `tdf:",remaining"`
+
+	// Sections preserves any section nested in the class's section.
+	Sections []Section `tdf:",sections"`
+
+	// Meta records which keys the source had, in what order and with what
+	// text, so an explicit zero survives a round trip (see tdf.Meta).
+	Meta tdf.Meta `tdf:",meta"`
 }
 
 // MovementClass is the read interface satisfied by every game's movement-class

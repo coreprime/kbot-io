@@ -1,5 +1,7 @@
 package common
 
+import "github.com/coreprime/kbot-io/formats/tdf"
+
 // Section is a generic, recursively-typed TDF section. It captures any nesting
 // of key=value fields and child sections without naming individual keys, so it
 // round-trips arbitrary TDF documents losslessly. Use it to model formats whose
@@ -13,4 +15,9 @@ type Section struct {
 
 	// Children holds this section's nested sub-sections, recursively.
 	Children []Section `tdf:",sections"`
+
+	// Meta records the order of the section's keys and child sections and
+	// their spelling, so a round trip keeps the source's layout (see
+	// tdf.Meta).
+	Meta tdf.Meta `tdf:",meta"`
 }
