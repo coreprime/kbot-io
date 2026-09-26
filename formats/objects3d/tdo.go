@@ -1,7 +1,3 @@
-// Package objects3d implements reading of Total Annihilation 3DO model files.
-//
-// 3DO files contain hierarchical 3D objects with vertices, primitives
-// (points, lines, triangles, quads), and texture references.
 package objects3d
 
 import (
