@@ -564,37 +564,85 @@ func (m *Map) LoadFeatures(r io.ReadSeeker) ([]Feature, error) {
 	return features, nil
 }
 
-// GetFeaturePlacements returns all placed features from the MapAttr grid.
+// GetFeaturePlacements returns the features the map places, in row-major
+// cell order.
+//
+// For TA maps a cell places a feature when its word is below the feature
+// table's count (Header.TileAnims) and below FeatureSentinelFloor, as in the
+// game; other words (FeatureNone, FeatureVoid, other sentinels, and indices
+// beyond the table) place nothing. A map built in code must therefore set
+// Header.TileAnims (Save and Pack do), or use FeaturePlacementsFor.
+// TA: Kingdoms maps list every feature-grid value below 0xFF00.
 func (m *Map) GetFeaturePlacements() []FeaturePlacement {
 	if m.IsTAK {
 		// TA:K stores placements in its DataUnit feature grid rather than
 		// the TA attribute array; same 16px cell resolution either way.
 		return m.TAKFeaturePlacements()
 	}
-	if m.TileAttr == nil {
+	return m.FeaturePlacementsFor(m.featureTableSize())
+}
+
+// FeaturePlacementsFor is GetFeaturePlacements for a feature table of
+// featureCount entries. A negative featureCount means the table size is
+// unknown, and then every word below the sentinel floor (0xFF00 for TA:
+// Kingdoms) counts as a placement.
+func (m *Map) FeaturePlacementsFor(featureCount int) []FeaturePlacement {
+	w, h, cells := m.featureGrid()
+	if cells == nil {
 		return nil
 	}
+	floor := FeatureSentinelFloor
+	if m.IsTAK {
+		floor = takNoFeature
+	}
+	scale := 16
+	if m.IsTAK {
+		scale = TAKDataUnit
+	}
 	var placements []FeaturePlacement
-	for ay := 0; ay < m.AttrH; ay++ {
-		for ax := 0; ax < m.AttrW; ax++ {
-			f := m.TileAttr[ay*m.AttrW+ax].Feature
-			// Any value at or above the sentinel threshold (0xFFFF empty,
-			// 0xFFFC void, and other 0xFFxx markers) is not a feature index.
-			// This matches the threshold used by the TA:K feature path and the
-			// packer rather than an incomplete hard-coded sentinel list.
-			if f >= takNoFeature {
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			f := cells(y*w + x)
+			if f >= floor || (featureCount >= 0 && int(f) >= featureCount) {
 				continue
 			}
 			placements = append(placements, FeaturePlacement{
 				FeatureIdx: int(f),
-				AttrX:      ax,
-				AttrY:      ay,
-				PixelX:     ax * 16,
-				PixelY:     ay * 16,
+				AttrX:      x,
+				AttrY:      y,
+				PixelX:     x * scale,
+				PixelY:     y * scale,
 			})
 		}
 	}
 	return placements
+}
+
+// featureGrid returns the feature grid's size and an accessor for its
+// words, or a nil accessor when the map has none.
+func (m *Map) featureGrid() (w, h int, word func(int) uint16) {
+	if m.IsTAK {
+		if m.TAKFeatureGrid == nil || m.TAKW == 0 || len(m.TAKFeatureGrid) < m.TAKW*m.TAKH {
+			return 0, 0, nil
+		}
+		return m.TAKW, m.TAKH, func(i int) uint16 { return m.TAKFeatureGrid[i] }
+	}
+	if m.TileAttr == nil || m.AttrW == 0 || len(m.TileAttr) < m.AttrW*m.AttrH {
+		return 0, 0, nil
+	}
+	return m.AttrW, m.AttrH, func(i int) uint16 { return m.TileAttr[i].Feature }
+}
+
+// featureTableSize returns the feature count the header records.
+func (m *Map) featureTableSize() int {
+	return int(m.Header.TileAnims)
+}
+
+// PlacesFeature reports whether a TA attribute word places a feature from a
+// table of featureCount entries: it must be below featureCount and below
+// FeatureSentinelFloor.
+func PlacesFeature(word uint16, featureCount int) bool {
+	return word < FeatureSentinelFloor && int(word) < featureCount
 }
 
 // takGraphicUnit is the pixel size of a TA: Kingdoms Graphic Unit (terrain

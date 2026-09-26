@@ -49,8 +49,9 @@ type MinimapMetadata struct {
 	Height int `json:"height"`
 }
 
-// FeatureMarker records a cell whose feature column holds a non-placement
-// sentinel value (commonly 0xFFFE "void" or 0xFFFC seen on early maps).
+// FeatureMarker records a cell whose feature column holds a word that places
+// no feature and is not FeatureNone: a sentinel (commonly 0xFFFC or 0xFFFE)
+// or an index beyond the feature table.
 type FeatureMarker struct {
 	X     int    `json:"x"`
 	Y     int    `json:"y"`
@@ -83,7 +84,8 @@ func Unpack(m *Map, features []Feature, palette color.Palette, dir string) error
 //	minimap.png        paletted PNG of the embedded minimap
 //	tiles/<n>.png      paletted 32x32 PNG per unique tile
 //	tilemap.csv        2D grid of tile indices
-//	features.csv       feature_index,name,attr_x,attr_y per placement
+//	features.csv       feature_index,name,attr_x,attr_y per placement (words
+//	                   that place no feature go to metadata.json instead)
 //	metadata.json      header constants + feature table + round-trip info
 //
 // dir is created if missing.
@@ -165,10 +167,13 @@ func UnpackWithOptions(m *Map, features []Feature, palette color.Palette, dir st
 	if len(m.MapDataPad) > 0 {
 		meta.MapDataPadB64 = base64.StdEncoding.EncodeToString(m.MapDataPad)
 	}
+	// Every word that is neither empty nor a placement (sentinels, and
+	// indices beyond the feature table, which the game ignores) is kept
+	// verbatim here rather than in features.csv.
 	for y := 0; y < m.AttrH; y++ {
 		for x := 0; x < m.AttrW; x++ {
 			v := m.TileAttr[y*m.AttrW+x].Feature
-			if v == 0xFFFF || int(v) < len(features) {
+			if v == FeatureNone || PlacesFeature(v, len(features)) {
 				continue
 			}
 			meta.FeatureSentinels = append(meta.FeatureSentinels, FeatureMarker{X: x, Y: y, Value: v})
@@ -319,6 +324,8 @@ func Pack(dir string) (*Map, []Feature, error) {
 	m := &Map{
 		Header: Header{
 			IDVersion: idv,
+			Tiles:     uint32(len(tiles)),
+			TileAnims: uint32(len(featureNames)),
 			SeaLevel:  meta.Header.SeaLevel,
 			Unknown1:  meta.Header.Unknown1,
 			Pad1:      meta.Header.Pad1,
@@ -478,11 +485,8 @@ func writeFeaturesCSV(path string, m *Map, features []Feature) error {
 	if err := w.Write([]string{"feature_index", "name", "attr_x", "attr_y"}); err != nil {
 		return err
 	}
-	for _, p := range m.GetFeaturePlacements() {
-		name := ""
-		if p.FeatureIdx < len(features) {
-			name = features[p.FeatureIdx].Name
-		}
+	for _, p := range m.FeaturePlacementsFor(len(features)) {
+		name := features[p.FeatureIdx].Name
 		if err := w.Write([]string{
 			strconv.Itoa(p.FeatureIdx),
 			name,

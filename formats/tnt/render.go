@@ -190,20 +190,37 @@ var (
 // per-cell buildability.  Each cell is classified, in priority order:
 //
 //	void          Feature == 0xFFFC (canonical engine-void sentinel)
-//	feature       Feature is a valid index in the .tnt feature table
+//	feature       Feature places an entry of the .tnt feature table
 //	underwater    Height < seaLevel (the cell would be submerged)
 //	cliff         max |Δheight| to a 4-neighbour exceeds the cliff
 //	              threshold — TA's pathing blocks traversal so no
 //	              build either
 //	buildable     otherwise
 //
+// The feature table's size is Header.TileAnims (which the reader, Save and
+// Pack fill in). When it is 0, as in a map built in code, every word below
+// FeatureSentinelFloor counts as a feature; RenderBuildMapFor takes the
+// count explicitly. TA: Kingdoms maps always use Header.TileAnims.
+//
 // 0xFFFD / 0xFFFE are deliberately not treated as void — see
 // docs/formats/tnt.md.  When seaLevel is 0 the underwater check is
 // skipped (matches a map authoring tool that never wrote a sea level).
 // Returns nil when the map has no attribute grid.
 func (m *Map) RenderBuildMap(seaLevel uint32) *image.RGBA {
+	count := m.featureTableSize()
+	if count == 0 && !m.IsTAK {
+		count = -1
+	}
+	return m.RenderBuildMapFor(seaLevel, count)
+}
+
+// RenderBuildMapFor is RenderBuildMap for a feature table of featureCount
+// entries: a cell is feature-blocked when its word places one of them (see
+// PlacesFeature). A negative featureCount means the table size is unknown,
+// and every word below the sentinel floor then counts as a feature.
+func (m *Map) RenderBuildMapFor(seaLevel uint32, featureCount int) *image.RGBA {
 	if m.IsTAK {
-		return m.renderTAKBuildMap(seaLevel)
+		return m.renderTAKBuildMap(seaLevel, featureCount)
 	}
 	if m.TileAttr == nil || m.AttrW == 0 || m.AttrH == 0 {
 		return nil
@@ -218,19 +235,18 @@ func (m *Map) RenderBuildMap(seaLevel uint32) *image.RGBA {
 		heights[i] = int(a.Height)
 	}
 
-	// Header.TileAnims is the size of the feature name table — any
-	// Feature value below it is a real placement; anything ≥ it that
-	// isn't 0xFFFC is a non-sentinel oddity we treat as "no feature".
-	maxFeature := uint16(m.Header.TileAnims)
+	if featureCount < 0 {
+		featureCount = int(FeatureSentinelFloor)
+	}
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			i := y*w + x
 			a := m.TileAttr[i]
 			switch {
-			case a.Feature == 0xFFFC:
+			case a.Feature == FeatureVoid:
 				img.SetRGBA(x, y, buildMapVoid)
 				continue
-			case a.Feature < maxFeature:
+			case PlacesFeature(a.Feature, featureCount):
 				img.SetRGBA(x, y, buildMapFeatureBlock)
 				continue
 			}
@@ -253,7 +269,7 @@ func (m *Map) RenderBuildMap(seaLevel uint32) *image.RGBA {
 // buckets. TA:K has no void sentinel, so the black bucket never appears:
 // cells are feature-blocked (red), underwater (blue), cliff (yellow), or
 // buildable (green). Returns nil when the map carries no heightmap.
-func (m *Map) renderTAKBuildMap(seaLevel uint32) *image.RGBA {
+func (m *Map) renderTAKBuildMap(seaLevel uint32, featureCount int) *image.RGBA {
 	if m.TAKHeight == nil || m.TAKW == 0 || m.TAKH == 0 {
 		return nil
 	}
@@ -263,12 +279,14 @@ func (m *Map) renderTAKBuildMap(seaLevel uint32) *image.RGBA {
 	for i, v := range m.TAKHeight {
 		heights[i] = int(v)
 	}
-	maxFeature := uint16(m.Header.TileAnims)
+	if featureCount < 0 {
+		featureCount = m.featureTableSize()
+	}
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			i := y*w + x
 			if m.TAKFeatureGrid != nil {
-				if f := m.TAKFeatureGrid[i]; f < takNoFeature && f < maxFeature {
+				if f := m.TAKFeatureGrid[i]; f < takNoFeature && int(f) < featureCount {
 					img.SetRGBA(x, y, buildMapFeatureBlock)
 					continue
 				}
@@ -339,17 +357,22 @@ func (m *Map) RenderVoidMap() *image.RGBA {
 	return img
 }
 
-// FeatureCounts tallies placement counts keyed by feature index.
+// FeatureCounts tallies placement counts keyed by feature index, counting
+// exactly the placements GetFeaturePlacements lists.
 func (m *Map) FeatureCounts() map[int]int {
+	return countPlacements(m.GetFeaturePlacements())
+}
+
+// FeatureCountsFor is FeatureCounts for a feature table of featureCount
+// entries (see FeaturePlacementsFor).
+func (m *Map) FeatureCountsFor(featureCount int) map[int]int {
+	return countPlacements(m.FeaturePlacementsFor(featureCount))
+}
+
+func countPlacements(ps []FeaturePlacement) map[int]int {
 	out := make(map[int]int)
-	if m.TileAttr == nil {
-		return out
-	}
-	for _, a := range m.TileAttr {
-		if a.Feature == 0xFFFF || a.Feature == 0xFFFC || a.Feature == 0xFFFE {
-			continue
-		}
-		out[int(a.Feature)]++
+	for _, p := range ps {
+		out[p.FeatureIdx]++
 	}
 	return out
 }
