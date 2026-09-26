@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -190,9 +191,27 @@ func UnpackWithOptions(m *Map, features []Feature, palette color.Palette, dir st
 	return nil
 }
 
+// PackOptions tunes PackWithOptions.
+type PackOptions struct {
+	// AllowUnresolvedIndices accepts tilemap.csv indices at or beyond the
+	// number of tiles/<n>.png files, as SaveOptions.AllowUnresolvedIndices
+	// does for Save.
+	AllowUnresolvedIndices bool
+}
+
 // Pack reads a directory written by Unpack and reconstructs the Map + Feature
 // table.  Callers can then call Map.Save to write out a fresh TNT.
+//
+// Pack refuses a tilemap.csv value outside 0..65535 or not below the number
+// of tile files, a features.csv index outside the feature table, and a
+// feature table of FeatureSentinelFloor or more names. PackWithOptions can
+// allow tile indices beyond the tile set.
 func Pack(dir string) (*Map, []Feature, error) {
+	return PackWithOptions(dir, PackOptions{})
+}
+
+// PackWithOptions is Pack with options.
+func PackWithOptions(dir string, opts PackOptions) (*Map, []Feature, error) {
 	metaPath := filepath.Join(dir, "metadata.json")
 	metaBytes, err := os.ReadFile(metaPath)
 	if err != nil {
@@ -223,6 +242,14 @@ func Pack(dir string) (*Map, []Feature, error) {
 	if tileW*2 != attrW || tileH*2 != attrH {
 		return nil, nil, fmt.Errorf("tilemap (%dx%d) does not match heightmap (%dx%d)", tileW, tileH, attrW, attrH)
 	}
+	tiles, err := readTilesDir(filepath.Join(dir, "tiles"))
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(tiles) > MaxTiles {
+		return nil, nil, fmt.Errorf("%d tile files: 16-bit tile indices address at most %d", len(tiles), MaxTiles)
+	}
+
 	tileMap := make([]uint16, tileW*tileH)
 	for y, row := range tileRows {
 		if len(row) != tileW {
@@ -233,13 +260,14 @@ func Pack(dir string) (*Map, []Feature, error) {
 			if perr != nil {
 				return nil, nil, fmt.Errorf("tilemap.csv [%d,%d] not numeric: %q", x, y, cell)
 			}
+			if v < 0 || v > math.MaxUint16 {
+				return nil, nil, fmt.Errorf("tilemap.csv [%d,%d] = %d is not a 16-bit tile index", x, y, v)
+			}
+			if v >= len(tiles) && !opts.AllowUnresolvedIndices {
+				return nil, nil, fmt.Errorf("tilemap.csv [%d,%d] = %d but there are only %d tiles", x, y, v, len(tiles))
+			}
 			tileMap[y*tileW+x] = uint16(v)
 		}
-	}
-
-	tiles, err := readTilesDir(filepath.Join(dir, "tiles"))
-	if err != nil {
-		return nil, nil, err
 	}
 
 	attrs := make([]TileAttr, attrW*attrH)
@@ -273,6 +301,9 @@ func Pack(dir string) (*Map, []Feature, error) {
 			return nil, nil, derr
 		}
 		featureNames = discovered
+	}
+	if len(featureNames) >= int(FeatureSentinelFloor) {
+		return nil, nil, fmt.Errorf("%d feature names: the table must hold fewer than %d", len(featureNames), FeatureSentinelFloor)
 	}
 	if err := applyFeaturesCSV(filepath.Join(dir, "features.csv"), attrs, attrW, attrH, featureNames, lossy); err != nil {
 		return nil, nil, err
@@ -543,6 +574,9 @@ func readTilesDir(dir string) ([][]byte, error) {
 		return nil, fmt.Errorf("no <n>.png tile files in %s", dir)
 	}
 	sort.Slice(found, func(i, j int) bool { return found[i].idx < found[j].idx })
+	if found[0].idx < 0 || found[len(found)-1].idx >= MaxTiles {
+		return nil, fmt.Errorf("tile files in %s must be numbered 0..%d", dir, MaxTiles-1)
+	}
 	tiles := make([][]byte, found[len(found)-1].idx+1)
 	for _, t := range found {
 		img, derr := decodePNGFile(t.path)
@@ -617,7 +651,7 @@ func applyFeaturesCSV(path string, attrs []TileAttr, attrW, attrH int, featureNa
 			if ierr != nil {
 				return fmt.Errorf("features.csv row %d feature_index not numeric: %q", ri, row[0])
 			}
-			if len(featureNames) > 0 && (n < 0 || n >= len(featureNames)) {
+			if n < 0 || n >= len(featureNames) {
 				return fmt.Errorf("features.csv row %d feature_index %d out of range (table has %d entries)", ri, n, len(featureNames))
 			}
 			idx = n
