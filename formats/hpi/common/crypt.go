@@ -33,12 +33,24 @@ func EncryptInPlace(key uint8, startOffset int64, data []byte) {
 
 // TransformHeaderKey converts the raw HeaderKey value stored in the HPI header
 // into the per-byte XOR key used to (de)scramble the directory and chunk
-// regions. A HeaderKey of 0 disables encryption.
+// regions.
+//
+// The key is the header byte rotated left by two bits. The game derives the
+// complement of that value and applies it to the complemented data byte,
+// which gives the same result for every header byte except 0xFF: there the
+// game's derived key is 0, so a header byte of 0xFF, like 0, means the archive
+// is not encrypted. TransformHeaderKey returns 0 for both.
 func TransformHeaderKey(headerKey uint8) uint8 {
-	if headerKey == 0 {
+	if IsPlaintextKey(headerKey) {
 		return 0
 	}
 	return (headerKey << 2) | (headerKey >> 6)
+}
+
+// IsPlaintextKey reports whether a header key byte leaves the archive
+// unencrypted. TA 3.1c treats both 0 and 0xFF as "no encryption".
+func IsPlaintextKey(headerKey uint8) bool {
+	return headerKey == 0 || headerKey == 0xFF
 }
 
 // DecodeChunkBuffer reverses the per-chunk add/XOR transform: for each byte at

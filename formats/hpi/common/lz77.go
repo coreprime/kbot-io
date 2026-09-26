@@ -1,5 +1,10 @@
 package common
 
+import (
+	"errors"
+	"fmt"
+)
+
 // CompressLZ77 compresses data using the HPI sliding-window LZ77 format.
 //
 // Stream layout, per group of up to 8 items:
@@ -144,71 +149,83 @@ func matchLengthAt(data []byte, pos, dist, maxLen int) int {
 	return n
 }
 
-// DecompressLZ77 decompresses HPI LZ77 data into a buffer of decompressedSize
-// bytes using the 4096-byte sliding window scheme.
+// DecompressLZ77 decompresses an HPI LZ77 stream that must decode to exactly
+// decompressedSize bytes, using the 4096-byte sliding window scheme.
+//
+// The stream must end with its terminator (a back reference with window
+// offset 0). A stream that runs out of input before the terminator, that
+// would produce more than decompressedSize bytes, or that terminates early is
+// an error: TA 3.1c refuses such chunks, so accepting them would report
+// corrupt archives as valid.
 func DecompressLZ77(compressed []byte, decompressedSize int) ([]byte, error) {
-	output := make([]byte, 0, decompressedSize)
-	window := make([]byte, 4096)
-	inPos := 0
-	windowPos := uint32(1)
+	if decompressedSize < 0 {
+		return nil, fmt.Errorf("negative LZ77 output size %d", decompressedSize)
+	}
+	out, err := lz77Decode(compressed, decompressedSize)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) != decompressedSize {
+		return nil, fmt.Errorf("LZ77 stream decoded %d bytes, expected %d", len(out), decompressedSize)
+	}
+	return out, nil
+}
 
-	for inPos < len(compressed) {
+// lz77Decode decodes an LZ77 stream up to its terminator. It fails when the
+// input ends before the terminator or when the output would exceed limit.
+// The window starts zeroed with its write position at 1; a back reference
+// copies byte by byte, so a copy may overlap the bytes it is writing.
+func lz77Decode(in []byte, limit int) ([]byte, error) {
+	capHint := limit
+	if bound := len(in)*maxLZ77Expansion + 64; capHint > bound {
+		capHint = bound
+	}
+	out := make([]byte, 0, capHint)
+	var window [4096]byte
+	windowPos := 1
+	pos := 0
 
-		tag := uint8(compressed[inPos])
-		inPos++
-
-		for bit := uint32(0); bit < 8; bit++ {
-			if (tag & 1) == 0 {
-				// Literal byte
-				if inPos >= len(compressed) {
-					break
+	for {
+		if pos >= len(in) {
+			return nil, errors.New("LZ77 stream ends before its terminator")
+		}
+		tag := in[pos]
+		pos++
+		for bit := 0; bit < 8; bit++ {
+			if tag&(1<<bit) == 0 {
+				if pos >= len(in) {
+					return nil, errors.New("LZ77 stream ends before its terminator")
 				}
-
-				if len(output) >= decompressedSize {
-					return output, nil
+				if len(out) == limit {
+					return nil, fmt.Errorf("LZ77 stream decodes past %d bytes", limit)
 				}
-
-				b := compressed[inPos]
-				output = append(output, b)
+				b := in[pos]
+				pos++
+				out = append(out, b)
 				window[windowPos] = b
 				windowPos = (windowPos + 1) & 0xFFF
-				inPos++
-			} else {
-				// Window reference
-				if inPos+1 >= len(compressed) {
-					break
-				}
-
-				packedData := uint32(compressed[inPos]) | (uint32(compressed[inPos+1]) << 8)
-				offset := packedData >> 4
-				count := (packedData & 0x0F) + 2
-
-				inPos += 2
-
-				if offset == 0 {
-					return output, nil
-				}
-
-				if len(output)+int(count) > decompressedSize {
-					count = uint32(decompressedSize - len(output))
-				}
-
-				for x := uint32(0); x < count; x++ {
-					b := window[offset]
-					output = append(output, b)
-					window[windowPos] = b
-					offset = (offset + 1) & 0xFFF
-					windowPos = (windowPos + 1) & 0xFFF
-				}
+				continue
 			}
-
-			tag >>= 1
-		}
-
-		if len(output) >= decompressedSize {
-			return output, nil
+			if pos+1 >= len(in) {
+				return nil, errors.New("LZ77 stream ends before its terminator")
+			}
+			token := int(in[pos]) | int(in[pos+1])<<8
+			pos += 2
+			offset := token >> 4
+			if offset == 0 {
+				return out, nil
+			}
+			count := (token & 0x0F) + 2
+			if len(out)+count > limit {
+				return nil, fmt.Errorf("LZ77 stream decodes past %d bytes", limit)
+			}
+			for i := 0; i < count; i++ {
+				b := window[offset]
+				out = append(out, b)
+				window[windowPos] = b
+				offset = (offset + 1) & 0xFFF
+				windowPos = (windowPos + 1) & 0xFFF
+			}
 		}
 	}
-
-	return output, nil
 }
