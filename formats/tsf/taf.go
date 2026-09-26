@@ -17,12 +17,47 @@
 // This package can parse and re-emit both forms byte-for-byte, decompile a
 // binary TAF into a TSF document plus extracted layer images, and compile a
 // TSF document plus its images back into a binary TAF.
+//
+// # TSF text
+//
+// [ParseTSF] reads sections written as a "[Name]" line, a "{" line and a "}"
+// line, holding "Key = Value;" assignments (one per line; the value ends at
+// the first ';') and nested sections. Blank lines and "//" and "/* */"
+// comments may appear on any line, including between top-level sections. A
+// comment starts only at the start of a line, after a section header or
+// brace, or after the ';' that ends a value; elsewhere "//" and "/*" are part
+// of the name or value, so a path such as art//a.png is read whole.
+// [Document.String] reproduces a parsed file byte for byte, including
+// indentation, comments and mixed line endings; only nodes that were changed
+// or added are written in the canonical layout.
+//
+// # Images
+//
+// Layer images are PNG or JPEG files decoded with Go's image/png and
+// image/jpeg, limited to [MaxImagePixels] and read only from inside the
+// resolver's directory. PNG import follows the PNG specification strictly and
+// differs from the PNG loader TA 3.1c uses for the images in its Boneyards
+// markup pages. Go rejects files that loader shows: 16-bit palette images, a
+// palette whose length is any multiple of 3 (including one on a greyscale
+// image), ancillary chunks with bad checksums, a PLTE or tRNS chunk after the
+// image data, and an IEND chunk that carries data. Go also skips chunks that
+// stop that loader: an unknown critical chunk, a chunk type with bytes outside
+// A-Z and a-z, and a known ancillary chunk before IHDR.
+//
+// The PNGs this package writes are specification-conforming truecolour images
+// with alpha. That loader draws each sample byte as a game palette index,
+// ignoring PLTE, tRNS and the colour type, and does not decode images over 256
+// pixels on a side, so these files do not display as authored in the game's
+// markup pages. Only 8-bit palette or greyscale PNGs holding TA palette
+// indices, with palette entry 0 black (otherwise the loader inverts the
+// indices) and no reliance on transparency, do.
 package tsf
 
 import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 )
 
@@ -138,6 +173,12 @@ func (f *Frame) FlagByte() uint8 { return f.flagB }
 
 // ParseTAF parses a TAF file from a byte slice. The format is pointer-based,
 // so the whole file must be available.
+//
+// Each frame gets its own copy of its pixels. Frame records may point at the
+// same pixel block, so to keep memory use in proportion to the input, the
+// pixel data of all frames together may not exceed len(data); a file whose
+// frames reuse pixel blocks beyond that is rejected. Every retail TAF stores
+// each frame's pixels once and stays well within this bound.
 func ParseTAF(data []byte) (*TAF, error) {
 	if len(data) < headerSize+4 {
 		return nil, fmt.Errorf("taf: file too small (%d bytes)", len(data))
@@ -189,6 +230,8 @@ func parseSequence(data []byte, off uint32) (*TAF, error) {
 	copy(taf.nameField[:], data[off+8:off+8+nameFieldLen])
 
 	listOff := off + sequenceHeaderLen
+	// budget is how many more pixel bytes the frames may copy in total.
+	budget := len(data)
 	for i := uint16(0); i < frameCount; i++ {
 		itemOff := listOff + uint32(i)*frameListItemSize
 		if int(itemOff)+frameListItemSize > len(data) {
@@ -197,7 +240,7 @@ func parseSequence(data []byte, off uint32) (*TAF, error) {
 		infoPtr := binary.LittleEndian.Uint32(data[itemOff:])
 		duration := binary.LittleEndian.Uint32(data[itemOff+4:])
 
-		frame, err := parseFrame(data, infoPtr, duration)
+		frame, err := parseFrame(data, infoPtr, duration, &budget)
 		if err != nil {
 			return nil, fmt.Errorf("taf: frame %d: %w", i, err)
 		}
@@ -206,7 +249,10 @@ func parseSequence(data []byte, off uint32) (*TAF, error) {
 	return taf, nil
 }
 
-func parseFrame(data []byte, off, duration uint32) (*Frame, error) {
+// parseFrame decodes the frame info record at off and copies its pixels,
+// taking their size from *budget and failing when the budget cannot cover
+// them.
+func parseFrame(data []byte, off, duration uint32, budget *int) (*Frame, error) {
 	if int(off)+frameInfoSize > len(data) {
 		return nil, fmt.Errorf("frame info out of range at 0x%X", off)
 	}
@@ -233,6 +279,11 @@ func parseFrame(data []byte, off, duration uint32) (*Frame, error) {
 	if int(pixelPtr)+size > len(data) {
 		return nil, fmt.Errorf("pixel data out of range at 0x%X (%d bytes)", pixelPtr, size)
 	}
+	if size > *budget {
+		return nil, fmt.Errorf("pixel data at 0x%X (%d bytes) brings the frames' pixel total past the %d-byte file size",
+			pixelPtr, size, len(data))
+	}
+	*budget -= size
 	pixels := make([]byte, size)
 	copy(pixels, data[pixelPtr:int(pixelPtr)+size])
 
@@ -272,9 +323,13 @@ func (t *TAF) Bytes() ([]byte, error) {
 	infoOff := listOff + uint32(frameCount*frameListItemSize)
 	pixOff := infoOff + uint32(frameCount*frameInfoSize)
 
-	total := pixOff
+	var pixelBytes uint64
 	for _, f := range t.Frames {
-		total += uint32(len(f.Pixels))
+		pixelBytes += uint64(len(f.Pixels))
+	}
+	total, err := serializedSize(pixOff, pixelBytes)
+	if err != nil {
+		return nil, err
 	}
 
 	out := make([]byte, total)
@@ -314,6 +369,17 @@ func (t *TAF) Bytes() ([]byte, error) {
 	}
 
 	return out, nil
+}
+
+// serializedSize returns the size of a TAF whose pixel data starts at pixOff
+// and holds pixelBytes bytes. Offsets are 32-bit, so the whole file must fit
+// in 4 GiB.
+func serializedSize(pixOff uint32, pixelBytes uint64) (uint64, error) {
+	total := uint64(pixOff) + pixelBytes
+	if total > math.MaxUint32 {
+		return 0, fmt.Errorf("taf: animation needs %d bytes, more than 32-bit offsets can address", total)
+	}
+	return total, nil
 }
 
 func (f *Frame) validate() error {

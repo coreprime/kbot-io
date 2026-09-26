@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os"
 )
 
@@ -140,7 +141,10 @@ func (r *Reader) Version() string {
 
 // ReadHeader parses a Bink header from r.  It reads only as far as the audio
 // track tables; the per-frame index and the compressed bitstream are left
-// untouched.
+// untouched.  Headers with a zero frame count, a file size that does not fit
+// in 32 bits, a zero frame-rate numerator or denominator, implausible
+// dimensions or more than 256 audio tracks are rejected, so FrameRate and
+// Duration are never 0 for a parsed file.
 func ReadHeader(r io.Reader) (*Header, error) {
 	var sig [4]byte
 	if _, err := io.ReadFull(r, sig[:]); err != nil {
@@ -166,6 +170,11 @@ func ReadHeader(r io.Reader) (*Header, error) {
 	fileSizeMinus8, err := read32("file size")
 	if err != nil {
 		return nil, err
+	}
+	// The field stores the size less 8; Bink 1 offsets are 32-bit, so a
+	// total that does not fit in 32 bits is corrupt.
+	if fileSizeMinus8 > math.MaxUint32-8 {
+		return nil, fmt.Errorf("implausible file size field 0x%08X", fileSizeMinus8)
 	}
 	h.FileSize = fileSizeMinus8 + 8
 
@@ -198,6 +207,9 @@ func ReadHeader(r io.Reader) (*Header, error) {
 	}
 	if h.FPSDen, err = read32("fps denominator"); err != nil {
 		return nil, err
+	}
+	if h.FPSNum == 0 || h.FPSDen == 0 {
+		return nil, fmt.Errorf("invalid frame rate %d/%d", h.FPSNum, h.FPSDen)
 	}
 	if h.VideoFlags, err = read32("video flags"); err != nil {
 		return nil, err

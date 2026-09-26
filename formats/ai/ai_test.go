@@ -113,8 +113,9 @@ Limit ARMPW 20`
 }
 
 // TestParseNoPlan covers the TA: Kingdoms style where the file lists weights
-// and limits without any `plan` directive. The parser should bucket them into
-// a single synthetic "default" plan instead of silently dropping every line.
+// and limits without any `plan` directive. By default they form the preamble,
+// which TA ignores at game start; the DefaultPlan option buckets them into a
+// single implicit "default" plan that applies at every difficulty.
 func TestParseNoPlan(t *testing.T) {
 	content := `// Kingdoms Default AI Profile
 weight araarch 5
@@ -125,12 +126,31 @@ limit araarch 16`
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
+	if len(f.Plans) != 0 {
+		t.Fatalf("plans = %d, want 0", len(f.Plans))
+	}
+	if f.Preamble == nil || len(f.Preamble.Weights) != 2 || len(f.Preamble.Limits) != 1 {
+		t.Fatalf("preamble = %+v, want 2 weights and 1 limit", f.Preamble)
+	}
+
+	f, err = ParseWith([]byte(content), ParseOptions{DefaultPlan: true})
+	if err != nil {
+		t.Fatalf("ParseWith: %v", err)
+	}
+	if f.Preamble != nil {
+		t.Errorf("preamble = %+v, want nil with DefaultPlan", f.Preamble)
+	}
 	if len(f.Plans) != 1 {
 		t.Fatalf("plans = %d, want 1", len(f.Plans))
 	}
 	p := f.Plans[0]
-	if p.Name != defaultPlanName {
-		t.Errorf("plan name = %q, want %q", p.Name, defaultPlanName)
+	if p.Name != DefaultPlanName || !p.Implicit {
+		t.Errorf("plan = %q (implicit %v), want implicit %q", p.Name, p.Implicit, DefaultPlanName)
+	}
+	for _, d := range []Difficulty{Easy, Medium, Hard} {
+		if !p.Matches(d) {
+			t.Errorf("implicit plan does not match %v", d)
+		}
 	}
 	if len(p.Weights) != 2 {
 		t.Errorf("weights = %d, want 2", len(p.Weights))

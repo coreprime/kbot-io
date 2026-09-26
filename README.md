@@ -95,6 +95,17 @@ The HPI readers and the VFS resolve files the way Total Annihilation 3.1c does:
   empty, `.` and `..` path segments and names over 255 bytes.
 - **Checking an archive.** `hpi.Validate` reports the version, header and
   effective key, trailer, and whether TA 3.1c would mount the file.
+## PNG images and the game
+
+The PNG and APNG files kbot-io writes (GAF frames, 3DO renders, TAF frames)
+follow the PNG specification, and PNG import uses Go's `image/png`, which
+applies it strictly. TA 3.1c's own PNG loader, used for images in its
+Boneyards markup pages, is different: it draws each sample byte as a game
+palette index (ignoring PLTE, tRNS and the colour type), skips images over
+256 pixels on a side, accepts some files Go rejects and stops at some chunks
+Go skips. Only 8-bit palette or greyscale PNGs holding TA palette indices,
+with palette entry 0 black and no reliance on transparency, display there as
+authored. The `formats/tsf` package documentation lists the differences.
 
 ## Testing
 

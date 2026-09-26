@@ -8,9 +8,11 @@ import (
 	"image/draw"
 	_ "image/jpeg" // register JPEG decoder for retail TSF .jpg layers
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // ImageResolver loads a layer image referenced by a TSF Filename and returns it
@@ -26,7 +28,9 @@ type ImageResolver interface {
 // section (defaulting to ARGB4444), the duration from "Delay", and the
 // placement from the layer's "AnchorX"/"AnchorY". A "Flags" assignment, when
 // present, restores the preserved frame-info byte so a decompiled animation can
-// be recompiled byte-for-byte.
+// be recompiled byte-for-byte. Each value must fit its binary field (Delay
+// 0-4294967295, AnchorX and AnchorY -32768-32767, Flags 0-255); a value
+// outside that range is an error rather than being wrapped.
 func Compile(doc *Document, res ImageResolver) (*TAF, error) {
 	if doc == nil || len(doc.Sections) == 0 {
 		return nil, fmt.Errorf("tsf: document has no animation section")
@@ -85,19 +89,19 @@ func compileFrame(fs *Section, res ImageResolver) (*Frame, error) {
 		}
 	}
 
-	duration, err := getInt(fs, "Delay", 0)
+	duration, err := getInt(fs, "Delay", 0, math.MaxUint32)
 	if err != nil {
 		return nil, err
 	}
-	originX, err := getInt(layer, "AnchorX", 0)
+	originX, err := getInt(layer, "AnchorX", math.MinInt16, math.MaxInt16)
 	if err != nil {
 		return nil, err
 	}
-	originY, err := getInt(layer, "AnchorY", 0)
+	originY, err := getInt(layer, "AnchorY", math.MinInt16, math.MaxInt16)
 	if err != nil {
 		return nil, err
 	}
-	flagB, err := getInt(fs, "Flags", 0)
+	flagB, err := getInt(fs, "Flags", 0, math.MaxUint8)
 	if err != nil {
 		return nil, err
 	}
@@ -119,14 +123,19 @@ func compileFrame(fs *Section, res ImageResolver) (*Frame, error) {
 	}, nil
 }
 
-func getInt(s *Section, key string, def int) (int, error) {
+// getInt reads an optional integer assignment (0 when absent) and checks it
+// against the range of the binary field it is stored in.
+func getInt(s *Section, key string, lo, hi int64) (int64, error) {
 	v, ok := s.Get(key)
 	if !ok {
-		return def, nil
+		return 0, nil
 	}
-	n, err := strconv.Atoi(v)
+	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("%s = %q: %w", key, v, err)
+	}
+	if n < lo || n > hi {
+		return 0, fmt.Errorf("%s = %d is outside the range %d to %d", key, n, lo, hi)
 	}
 	return n, nil
 }
@@ -149,20 +158,36 @@ func (m MemoryResolver) Resolve(filename string) (*image.NRGBA, error) {
 	if !ok {
 		return nil, fmt.Errorf("image %q not found", filename)
 	}
-	return decodeNRGBA(data)
+	return decodeNRGBA(filename, data)
 }
 
 // DirResolver resolves filenames against a directory on disk. Lookups are
-// case-insensitive to match the game's tolerant filename handling.
+// case-insensitive to match the game's tolerant filename handling, and a
+// backslash separates directories as in the game's own paths. Names are
+// confined to the directory: absolute paths and names that climb out of it
+// with ".." are rejected, and symbolic links cannot lead outside it. An empty
+// DirResolver resolves against the working directory.
 type DirResolver string
 
 // Resolve implements ImageResolver.
 func (d DirResolver) Resolve(filename string) (*image.NRGBA, error) {
-	path := filepath.Join(string(d), filename)
-	data, err := os.ReadFile(path)
+	name, err := localName(filename)
 	if err != nil {
-		if alt, ok := findCaseInsensitive(string(d), filename); ok {
-			data, err = os.ReadFile(alt)
+		return nil, err
+	}
+	dir := string(d)
+	if dir == "" {
+		dir = "."
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	data, err := root.ReadFile(name)
+	if err != nil {
+		if alt, ok := findCaseInsensitive(root, name); ok {
+			data, err = root.ReadFile(alt)
 		}
 	}
 	if err != nil {
@@ -171,20 +196,47 @@ func (d DirResolver) Resolve(filename string) (*image.NRGBA, error) {
 	return decodeImageFile(filename, data)
 }
 
-func findCaseInsensitive(dir, filename string) (string, bool) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", false
+// localName converts a layer filename into a relative path inside the
+// resolver's directory, treating backslashes as separators.
+func localName(filename string) (string, error) {
+	name := filepath.FromSlash(strings.ReplaceAll(filename, "\\", "/"))
+	if !filepath.IsLocal(name) {
+		return "", fmt.Errorf("image %q is outside the image directory", filename)
 	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	return filepath.Clean(name), nil
+}
+
+// findCaseInsensitive resolves name one path element at a time, matching each
+// element against the directory entries without regard to ASCII case.
+func findCaseInsensitive(root *os.Root, name string) (string, bool) {
+	dir := "."
+	parts := strings.Split(filepath.ToSlash(name), "/")
+	for i, part := range parts {
+		f, err := root.Open(dir)
+		if err != nil {
+			return "", false
 		}
-		if equalFold(e.Name(), filename) {
-			return filepath.Join(dir, e.Name()), true
+		entries, err := f.ReadDir(-1)
+		_ = f.Close()
+		if err != nil {
+			return "", false
 		}
+		found := ""
+		for _, e := range entries {
+			if i == len(parts)-1 && e.IsDir() {
+				continue
+			}
+			if equalFold(e.Name(), part) {
+				found = e.Name()
+				break
+			}
+		}
+		if found == "" {
+			return "", false
+		}
+		dir = filepath.Join(dir, found)
 	}
-	return "", false
+	return dir, true
 }
 
 func equalFold(a, b string) bool {
@@ -206,9 +258,31 @@ func equalFold(a, b string) bool {
 	return true
 }
 
+// MaxImagePixels is the largest layer image, in pixels, the resolvers
+// decode. It is checked against the image header before any pixels are
+// decoded; a TAF frame is also limited to 65535 pixels on each side.
+const MaxImagePixels = 1 << 24
+
+// checkImageSize rejects images too large for a TAF frame or the decode
+// budget, reading only the image header.
+func checkImageSize(filename string, data []byte) error {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("decode %q: %w", filename, err)
+	}
+	if cfg.Width > 0xFFFF || cfg.Height > 0xFFFF || int64(cfg.Width)*int64(cfg.Height) > MaxImagePixels {
+		return fmt.Errorf("image %q is %dx%d, larger than a TAF frame allows (%d pixels at most)",
+			filename, cfg.Width, cfg.Height, MaxImagePixels)
+	}
+	return nil
+}
+
 // decodeImageFile decodes PNG or JPEG (the formats referenced by retail TSF)
 // into a non-premultiplied RGBA image.
 func decodeImageFile(filename string, data []byte) (*image.NRGBA, error) {
+	if err := checkImageSize(filename, data); err != nil {
+		return nil, err
+	}
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("decode %q: %w", filename, err)
@@ -216,7 +290,10 @@ func decodeImageFile(filename string, data []byte) (*image.NRGBA, error) {
 	return toNRGBA(img), nil
 }
 
-func decodeNRGBA(data []byte) (*image.NRGBA, error) {
+func decodeNRGBA(filename string, data []byte) (*image.NRGBA, error) {
+	if err := checkImageSize(filename, data); err != nil {
+		return nil, err
+	}
 	img, err := png.Decode(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
