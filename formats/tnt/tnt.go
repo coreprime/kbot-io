@@ -53,11 +53,26 @@ type Header struct {
 // sentinel (e.g. 0xFFFF, 0xFFFB) rather than a feature index.
 const takNoFeature = 0xFF00
 
+// Feature words stored in TileAttr.Feature. A word below the feature-table
+// count (Header.TileAnims) and below FeatureSentinelFloor places that table
+// entry on the cell; every other word places nothing.
+const (
+	// FeatureNone marks a cell with no feature.
+	FeatureNone uint16 = 0xFFFF
+	// FeatureVoid marks a void cell: the game makes it impassable and
+	// unbuildable although no feature stands there.
+	FeatureVoid uint16 = 0xFFFC
+	// FeatureSentinelFloor is the lowest sentinel word. Words at or above it
+	// are never feature-table indices, whatever the table size, so a
+	// feature table must hold fewer than FeatureSentinelFloor entries.
+	FeatureSentinelFloor uint16 = 0xFFFB
+)
+
 // TileAttr is the per-cell attribute (4 bytes).
 // There is one attribute per 16×16 pixel cell — 4 per 32×32 tile.
 type TileAttr struct {
 	Height  uint8  // Elevation at this cell
-	Feature uint16 // Feature index (0xFFFF = none)
+	Feature uint16 // Feature-table index or sentinel word (FeatureNone, FeatureVoid, ...)
 	Pad     uint8
 }
 
@@ -104,6 +119,13 @@ type Map struct {
 }
 
 // LoadFromReader parses a TNT file.
+//
+// Every section is checked against the length of r before it is allocated or
+// read, so a header that claims more data than the file holds fails with an
+// error instead of a huge allocation. A tile map, attribute block, tile set or
+// feature table that runs past the end of the file is an error; a section with
+// no bytes (a zero count) is never checked, because nothing reads its pointer.
+// A missing or malformed minimap is dropped and the map still loads.
 func LoadFromReader(r io.ReadSeeker) (*Map, error) {
 	m := &Map{}
 
@@ -125,78 +147,195 @@ func LoadFromReader(r io.ReadSeeker) (*Map, error) {
 			m.Header.IDVersion, VersionTA, VersionTAK)
 	}
 
+	size, err := streamSize(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to size TNT stream: %w", err)
+	}
+
 	m.TileW = int(m.Header.Width) / 2
 	m.TileH = int(m.Header.Height) / 2
 	m.AttrW = int(m.Header.Width)
 	m.AttrH = int(m.Header.Height)
 
-	// Read tile index map (TileW × TileH uint16 entries).
-	if _, err := r.Seek(int64(m.Header.PTRMapData), io.SeekStart); err != nil {
-		return nil, fmt.Errorf("failed to seek to map data: %w", err)
-	}
-	tileCount := m.TileW * m.TileH
-	m.TileMap = make([]uint16, tileCount)
-	if err := binary.Read(r, binary.LittleEndian, m.TileMap); err != nil {
-		return nil, fmt.Errorf("failed to read tile map: %w", err)
+	tileCells := uint64(m.TileW) * uint64(m.TileH)
+	attrCells := uint64(m.Header.Width) * uint64(m.Header.Height)
+	tileMap := section{name: "tile map", off: m.Header.PTRMapData, n: tileCells * 2}
+	attrs := section{name: "attribute block", off: m.Header.PTRMapAttr, n: attrCells * attrRecordSize}
+	gfx := section{name: "tile graphics", off: m.Header.PTRTileGfx, n: uint64(m.Header.Tiles) * TileGfxSize}
+	feats := section{name: "feature table", off: m.Header.PTRTileAnim, n: uint64(m.Header.TileAnims) * TileAnimEntrySize}
+	for _, s := range []section{tileMap, attrs, gfx, feats} {
+		if err := s.check(size); err != nil {
+			return nil, err
+		}
 	}
 
-	// Capture any padding between the tile-index block and the attribute block.
-	mapDataEnd := int64(m.Header.PTRMapData) + int64(tileCount*2)
-	if int64(m.Header.PTRMapAttr) > mapDataEnd {
-		gap := int(int64(m.Header.PTRMapAttr) - mapDataEnd)
-		m.MapDataPad = make([]byte, gap)
-		if _, err := io.ReadFull(r, m.MapDataPad); err != nil {
+	// Read tile index map (TileW × TileH uint16 entries).
+	raw, err := readSection(r, tileMap)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read tile map: %w", err)
+	}
+	m.TileMap = make([]uint16, tileCells)
+	for i := range m.TileMap {
+		m.TileMap[i] = binary.LittleEndian.Uint16(raw[i*2:])
+	}
+
+	// Capture the padding between the tile-index block and the attribute
+	// block so a shipped file round-trips byte for byte.
+	if pad := m.mapDataPadSection(tileMap, attrs, gfx, feats); pad.n > 0 {
+		if m.MapDataPad, err = readSection(r, pad); err != nil {
 			return nil, fmt.Errorf("failed to read mapdata padding: %w", err)
 		}
 	}
 
 	// Read tile attributes (AttrW × AttrH entries at 16px resolution).
-	if _, err := r.Seek(int64(m.Header.PTRMapAttr), io.SeekStart); err != nil {
-		return nil, fmt.Errorf("failed to seek to map attr: %w", err)
+	raw, err = readSection(r, attrs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read attribute block: %w", err)
 	}
-	attrCount := m.AttrW * m.AttrH
-	m.TileAttr = make([]TileAttr, attrCount)
-	for i := 0; i < attrCount; i++ {
-		var a TileAttr
-		a.Height = readByte(r)
-		a.Feature = readUint16(r)
-		a.Pad = readByte(r)
-		m.TileAttr[i] = a
+	m.TileAttr = make([]TileAttr, attrCells)
+	for i := range m.TileAttr {
+		rec := raw[i*attrRecordSize:]
+		m.TileAttr[i] = TileAttr{
+			Height:  rec[0],
+			Feature: binary.LittleEndian.Uint16(rec[1:3]),
+			Pad:     rec[3],
+		}
 	}
 
-	// Read tile graphics.
-	if _, err := r.Seek(int64(m.Header.PTRTileGfx), io.SeekStart); err != nil {
-		return nil, fmt.Errorf("failed to seek to tile gfx: %w", err)
+	// Read tile graphics. Each tile is a capped sub-slice of one buffer.
+	raw, err = readSection(r, gfx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read tile graphics: %w", err)
 	}
 	m.Tiles = make([][]byte, m.Header.Tiles)
-	for i := uint32(0); i < m.Header.Tiles; i++ {
-		tile := make([]byte, 1024)
-		if _, err := io.ReadFull(r, tile); err != nil {
-			return nil, fmt.Errorf("failed to read tile %d: %w", i, err)
-		}
-		m.Tiles[i] = tile
+	for i := range m.Tiles {
+		m.Tiles[i] = raw[i*TileGfxSize : (i+1)*TileGfxSize : (i+1)*TileGfxSize]
 	}
 
-	// Read minimap.
+	// Read minimap. A minimap that is out of range or truncated is dropped;
+	// it is only a preview, so the map itself still loads.
 	if m.Header.PTRMinimap > 0 {
-		if _, err := r.Seek(int64(m.Header.PTRMinimap), io.SeekStart); err == nil {
-			var mmW, mmH uint32
-			if err := binary.Read(r, binary.LittleEndian, &mmW); err == nil {
-				if err := binary.Read(r, binary.LittleEndian, &mmH); err == nil {
-					if mmW > 0 && mmH > 0 && mmW <= 1024 && mmH <= 1024 {
-						pixels := make([]byte, mmW*mmH)
-						if _, err := io.ReadFull(r, pixels); err == nil {
-							m.Minimap = pixels
-							m.MinimapW = int(mmW)
-							m.MinimapH = int(mmH)
-						}
-					}
-				}
-			}
-		}
+		m.readMinimap(r, m.Header.PTRMinimap, size)
 	}
 
 	return m, nil
+}
+
+// attrRecordSize is the on-disk size of one attribute record.
+const attrRecordSize = 4
+
+// maxMinimapSide is the largest minimap edge the reader accepts; a larger
+// stored minimap is dropped.
+const maxMinimapSide = 1024
+
+// section is one byte range of a TNT file named by a header pointer.
+type section struct {
+	name string
+	off  uint32
+	n    uint64
+}
+
+// check reports an error when a non-empty section runs past size. An empty
+// section passes whatever its pointer holds.
+func (s section) check(size int64) error {
+	if s.n == 0 {
+		return nil
+	}
+	if s.n > uint64(size) || uint64(s.off) > uint64(size)-s.n {
+		return fmt.Errorf("TNT %s (%d bytes at offset %d) runs past the end of the file (%d bytes)",
+			s.name, s.n, s.off, size)
+	}
+	return nil
+}
+
+// overlaps reports whether the non-empty section shares a byte with
+// [start, end).
+func (s section) overlaps(start, end uint64) bool {
+	if s.n == 0 {
+		return false
+	}
+	return uint64(s.off) < end && uint64(s.off)+s.n > start
+}
+
+// mapDataPadSection returns the bytes between the end of the tile map and
+// the start of the attribute block when they hold nothing else. A gap that
+// another section overlaps is not padding: those bytes are written again
+// with their own section, so capturing them would duplicate them.
+func (m *Map) mapDataPadSection(tileMap, attrs section, others ...section) section {
+	if tileMap.n == 0 || attrs.n == 0 {
+		return section{}
+	}
+	start := uint64(tileMap.off) + tileMap.n
+	end := uint64(attrs.off)
+	if end <= start {
+		return section{}
+	}
+	for _, o := range others {
+		if o.overlaps(start, end) {
+			return section{}
+		}
+	}
+	if minimap := (section{off: m.Header.PTRMinimap, n: 8}); m.Header.PTRMinimap > 0 && minimap.overlaps(start, end) {
+		return section{}
+	}
+	return section{name: "mapdata padding", off: uint32(start), n: end - start}
+}
+
+// readMinimap reads the minimap stored at ptr, leaving m's minimap empty when
+// its header or pixels lie outside the file or a side is 0 or over 1024.
+func (m *Map) readMinimap(r io.ReadSeeker, ptr uint32, size int64) {
+	hdr := section{off: ptr, n: 8}
+	if hdr.check(size) != nil {
+		return
+	}
+	raw, err := readSection(r, hdr)
+	if err != nil {
+		return
+	}
+	mmW := binary.LittleEndian.Uint32(raw[0:4])
+	mmH := binary.LittleEndian.Uint32(raw[4:8])
+	if mmW == 0 || mmH == 0 || mmW > maxMinimapSide || mmH > maxMinimapSide {
+		return
+	}
+	pix := section{off: ptr + 8, n: uint64(mmW) * uint64(mmH)}
+	if uint64(ptr)+8 > uint64(^uint32(0)) || pix.check(size) != nil {
+		return
+	}
+	pixels, err := readSection(r, pix)
+	if err != nil {
+		return
+	}
+	m.Minimap = pixels
+	m.MinimapW = int(mmW)
+	m.MinimapH = int(mmH)
+}
+
+// streamSize returns the length of r and rewinds it to the start.
+func streamSize(r io.Seeker) (int64, error) {
+	size, err := r.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
+	return size, nil
+}
+
+// readSection reads the whole of s. The caller has checked it against the
+// stream length.
+func readSection(r io.ReadSeeker, s section) ([]byte, error) {
+	buf := make([]byte, s.n)
+	if s.n == 0 {
+		return buf, nil
+	}
+	if _, err := r.Seek(int64(s.off), io.SeekStart); err != nil {
+		return nil, err
+	}
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
 }
 
 // loadTAK parses a TA: Kingdoms TNT. TA:K reuses the TNT container but stores
@@ -225,18 +364,6 @@ func loadTAK(r io.ReadSeeker, m *Map) (*Map, error) {
 	m.Minimap = tm.Minimap
 	m.MinimapW, m.MinimapH = tm.MinimapW, tm.MinimapH
 	return m, nil
-}
-
-func readByte(r io.Reader) uint8 {
-	var b [1]byte
-	_, _ = io.ReadFull(r, b[:])
-	return b[0]
-}
-
-func readUint16(r io.Reader) uint16 {
-	var b [2]byte
-	_, _ = io.ReadFull(r, b[:])
-	return binary.LittleEndian.Uint16(b[:])
 }
 
 // RenderTileMap renders the full map as an RGBA image.
@@ -378,7 +505,8 @@ type FeaturePlacement struct {
 
 // LoadFeatures reads the feature name table. TA stores the table pointer at
 // 0x20 (PTRTileAnim); TA:K stores it at 0x18. Both use the same count field
-// (0x1c) and the same 4-byte-index + 128-byte-name entry layout.
+// (0x1c) and the same 4-byte-index + 128-byte-name entry layout. A table that
+// runs past the end of r is an error.
 func (m *Map) LoadFeatures(r io.ReadSeeker) ([]Feature, error) {
 	count := m.Header.TileAnims
 	if count == 0 {
@@ -388,25 +516,29 @@ func (m *Map) LoadFeatures(r io.ReadSeeker) ([]Feature, error) {
 	if m.IsTAK {
 		tablePtr = m.Header.Tiles // TA:K keeps the feature-name table at 0x18
 	}
-	if _, err := r.Seek(int64(tablePtr), io.SeekStart); err != nil {
+	size, err := streamSize(r)
+	if err != nil {
+		return nil, err
+	}
+	table := section{name: "feature table", off: tablePtr, n: uint64(count) * TileAnimEntrySize}
+	if err := table.check(size); err != nil {
+		return nil, err
+	}
+	raw, err := readSection(r, table)
+	if err != nil {
 		return nil, err
 	}
 
 	features := make([]Feature, count)
-	for i := uint32(0); i < count; i++ {
-		var idx uint32
-		if err := binary.Read(r, binary.LittleEndian, &idx); err != nil {
-			return nil, err
-		}
+	for i := range features {
+		rec := raw[i*TileAnimEntrySize : (i+1)*TileAnimEntrySize]
 		var rawName [128]byte
-		if _, err := io.ReadFull(r, rawName[:]); err != nil {
-			return nil, err
-		}
+		copy(rawName[:], rec[4:])
 		name := string(rawName[:])
 		if nul := strings.IndexByte(name, 0); nul >= 0 {
 			name = name[:nul]
 		}
-		features[i] = Feature{Index: int(idx), Name: name, Raw: rawName}
+		features[i] = Feature{Index: int(binary.LittleEndian.Uint32(rec[0:4])), Name: name, Raw: rawName}
 	}
 	return features, nil
 }
