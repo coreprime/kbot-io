@@ -22,12 +22,12 @@
 //     builds.
 //
 // Lines before the first plan line (the [AIFile.Preamble]) are ignored when a
-// game starts, because no plan has matched yet. The game re-applies the whole
-// profile when it is reloaded during a game, and the plan state is then left
-// over from the previous pass, so the preamble applies on a reload only when
-// the last plan line matched. TA: Kingdoms profiles have no plan lines and
-// their directives are always in force; [ParseOptions.DefaultPlan] reads such
-// files into one implicit plan that matches every difficulty.
+// game starts, because no plan has matched yet. They apply when the profile is
+// reloaded during a game: after applying the profile, the game sets the plan
+// flag to apply each downloadable unit type's own AI directives and leaves it
+// set, so a reload reads the preamble as if a plan had matched.
+// TA: Kingdoms profiles have no plan lines; [ParseOptions.DefaultPlan] reads
+// such files into one implicit plan that matches every difficulty.
 //
 // # Values
 //
@@ -53,8 +53,9 @@
 // value above 1 can restore a unit reduced earlier but never raises it past
 // 100%. A limit replaces the current one: -1 means unlimited, N lets a
 // computer player own at most N, and 0 or any other negative value forbids
-// the unit. The resolver models TA 3.1c; TA: Kingdoms uses a different weight
-// scale, which it does not model.
+// the unit. The resolver models TA 3.1c. TA: Kingdoms profiles use weights
+// above 1 (such as 5, 10 or 25); how TA: Kingdoms applies them is not
+// modelled.
 package ai
 
 import (
@@ -184,8 +185,9 @@ func (d Diagnostic) String() string { return fmt.Sprintf("line %d: %s", d.Line, 
 // AIFile represents a complete AI configuration file
 type AIFile struct {
 	// Preamble holds the weight and limit lines before the first plan line,
-	// which the game ignores when a game starts. It is nil when there are
-	// none, or when ParseOptions.DefaultPlan moved them into an implicit plan.
+	// which the game ignores when a game starts and applies when the profile
+	// is reloaded during a game. It is nil when there are none, or when
+	// ParseOptions.DefaultPlan moved them into an implicit plan.
 	Preamble *DifficultyPlan
 	// Plans holds the plans in file order.
 	Plans []DifficultyPlan
@@ -213,8 +215,8 @@ const DefaultPlanName = "default"
 type ParseOptions struct {
 	// DefaultPlan puts the weight and limit lines before the first plan line
 	// into an implicit plan named DefaultPlanName that matches every
-	// difficulty, instead of AIFile.Preamble. This is how TA: Kingdoms
-	// profiles, which have no plan lines, take effect.
+	// difficulty, instead of AIFile.Preamble. Use it for TA: Kingdoms
+	// profiles, which have no plan lines.
 	DefaultPlan bool
 }
 
