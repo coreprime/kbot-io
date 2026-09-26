@@ -429,8 +429,16 @@ func encodeBMP(w io.Writer, img image.Image) error {
 	return nil
 }
 
-// ConvertToGIFWithPalette converts a PCX file to GIF using a custom palette
+// ConvertToGIFWithPalette converts a PCX file to GIF, drawing its pixels
+// with pal instead of the file's own colours. An 8-bit image keeps its palette
+// indices, so each pixel shows pal's colour at the same index (this is how
+// TA: Kingdoms pairs images with separate palettes). A 24-bit image has no
+// indices and is mapped to the nearest colour in pal. pal's colours are used
+// as given, including their alpha.
 func ConvertToGIFWithPalette(w io.Writer, r io.Reader, pal *gaf.Palette) error {
+	if pal == nil {
+		return errors.New("pcx: nil palette")
+	}
 	reader, err := LoadFromReader(r)
 	if err != nil {
 		return err
@@ -441,22 +449,23 @@ func ConvertToGIFWithPalette(w io.Writer, r io.Reader, pal *gaf.Palette) error {
 		return err
 	}
 
-	// Convert GAF palette to color.Palette
 	palette := make(color.Palette, 256)
 	for i := 0; i < 256; i++ {
 		palette[i] = pal.Colors[i]
 	}
 
+	if src, ok := img.(*image.Paletted); ok {
+		remapped := &image.Paletted{Pix: src.Pix, Stride: src.Stride, Rect: src.Rect, Palette: palette}
+		return gif.Encode(w, remapped, nil)
+	}
+
 	bounds := img.Bounds()
 	paletted := image.NewPaletted(bounds, palette)
-
-	// Copy pixels (index mapping)
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			paletted.Set(x, y, img.At(x, y))
 		}
 	}
-
 	return gif.Encode(w, paletted, nil)
 }
 

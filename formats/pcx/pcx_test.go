@@ -6,6 +6,7 @@ import (
 	"errors"
 	"image"
 	"image/color"
+	"image/gif"
 	"os"
 	"strings"
 	"testing"
@@ -348,5 +349,35 @@ func TestDecodeIsRepeatable(t *testing.T) {
 	}
 	if !bytes.Equal(pixels(t, a), pixels(t, b)) || r.Truncated() {
 		t.Errorf("second Decode = %v, first = %v, truncated=%v", pixels(t, b), pixels(t, a), r.Truncated())
+	}
+}
+
+func TestConvertToGIFWithPaletteKeepsIndices(t *testing.T) {
+	// The file's colour 1 equals the custom palette's colour 2, so a
+	// nearest-colour conversion would pick the wrong index.
+	data := buildPCX(t, pcxSpec{width: 3, height: 1, pixels: []byte{0, 1, 2}})
+	m := testColorMap()
+	custom := &gaf.Palette{}
+	for i := range custom.Colors {
+		custom.Colors[i] = color.RGBA{R: byte(i), A: 255}
+	}
+	custom.Colors[2] = color.RGBA{m[3], m[4], m[5], 255}
+
+	var buf bytes.Buffer
+	if err := ConvertToGIFWithPalette(&buf, bytes.NewReader(data), custom); err != nil {
+		t.Fatal(err)
+	}
+	img, err := gif.Decode(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for x := 0; x < 3; x++ {
+		got := color.RGBAModel.Convert(img.At(x, 0)).(color.RGBA)
+		if got != custom.Colors[x] {
+			t.Errorf("pixel %d = %v, want custom colour %v", x, got, custom.Colors[x])
+		}
+	}
+	if err := ConvertToGIFWithPalette(&buf, bytes.NewReader(data), nil); err == nil {
+		t.Error("expected an error for a nil palette")
 	}
 }
