@@ -44,6 +44,15 @@ func TestKnownHeader(t *testing.T) {
 	if !r.HasAudio() {
 		t.Fatal("expected at least one audio track")
 	}
+	// One track: 22050 Hz, stereo, 8-bit, compressed (packed word 0xD0005622).
+	tracks := r.AudioTracks()
+	if len(tracks) != 1 {
+		t.Fatalf("audio tracks = %+v, want exactly one", tracks)
+	}
+	if tr := tracks[0]; tr.Index != 0 || tr.SampleRate != 22050 || tr.Channels() != 2 ||
+		tr.BitsPerSample() != 8 || !tr.Compressed {
+		t.Errorf("track = %+v, want track 0 at 22050 Hz, stereo, 8-bit, compressed", tr)
+	}
 }
 
 // TestParseAllVideos walks every Smacker file under data/ and asserts the
@@ -79,6 +88,14 @@ func TestParseAllVideos(t *testing.T) {
 		}
 		if r.FrameRate() <= 0 {
 			t.Errorf("%s: frame rate %.2f", filepath.Base(path), r.FrameRate())
+		}
+		// The shipped movies store their payloads back to back after the
+		// tables and trees, ending exactly at the end of the file.
+		if st, err := os.Stat(path); err == nil {
+			h := r.Header()
+			if end := h.FrameDataOffset() + int64(h.FrameDataSize()); end != st.Size() {
+				t.Errorf("%s: payloads end at %d, file is %d bytes", filepath.Base(path), end, st.Size())
+			}
 		}
 		seen++
 		return nil

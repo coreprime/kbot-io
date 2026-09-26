@@ -2,6 +2,7 @@ package smacker
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,28 +12,44 @@ import (
 const (
 	SignatureSMK2 = 0x324B4D53 // "SMK2" as little-endian uint32
 	SignatureSMK4 = 0x344B4D53 // "SMK4" as little-endian uint32
-	HeaderSize    = 104        // Minimum header size
+
+	// HeaderSize is the size of the fixed header. The frame-size table
+	// starts at this offset, directly after the header's final (unused)
+	// dword.
+	HeaderSize = 104
+
+	// AudioTrackCount is the number of audio tracks a header describes.
+	AudioTrackCount = 7
 )
 
 // Header represents a Smacker video file header
 type Header struct {
-	Signature    uint32 // Should be "SMK2" or "SMK4"
-	Width        uint32
-	Height       uint32
-	Frames       uint32
-	FrameRate    int32 // Microseconds per frame (negative = frames per second)
-	Flags        uint32
-	AudioSize    [7]uint32
-	TreesSize    uint32
-	MMapSize     uint32
-	MClrSize     uint32
-	FullSize     uint32
-	TypeSize     uint32
-	AudioRate    [7]uint32
-	AudioFlags   [7]uint32 // Lower 2 bytes: format, upper: channels
-	FrameSizes   []uint32  // Array of frame sizes
-	FrameTypes   []byte    // Array of frame types
-	HuffmanTrees []byte    // Huffman trees data
+	Signature uint32 // Should be "SMK2" or "SMK4"
+	Width     uint32
+	Height    uint32
+	Frames    uint32
+	FrameRate int32 // Microseconds per frame (negative = frames per second)
+	Flags     uint32
+	// AudioSize holds, per track, the size of the largest audio chunk in any
+	// frame (a buffer size, not the track's total size).
+	AudioSize [AudioTrackCount]uint32
+	TreesSize uint32
+	MMapSize  uint32
+	MClrSize  uint32
+	FullSize  uint32
+	TypeSize  uint32
+	// AudioRate holds each track's packed audio word as stored: the sample
+	// rate in the low 24 bits and the track's format flags in the high byte.
+	// Use AudioTrack to decode it.
+	AudioRate [AudioTrackCount]uint32
+	// AudioFlags holds the high byte of each AudioRate word (the track's
+	// format flags). The file has no separate flags table.
+	//
+	// Deprecated: use AudioTrack, which decodes the packed word.
+	AudioFlags   [AudioTrackCount]uint32
+	FrameSizes   []uint32 // Array of frame sizes
+	FrameTypes   []byte   // Array of frame types
+	HuffmanTrees []byte   // Huffman trees data
 	RingFrame    uint32
 }
 
@@ -40,6 +57,7 @@ type Header struct {
 type Reader struct {
 	file   *os.File
 	header *Header
+	size   int64
 }
 
 // OpenReader opens a Smacker video file for reading
@@ -48,8 +66,13 @@ func OpenReader(path string) (*Reader, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("failed to stat file: %w", err)
+	}
 
-	header, err := readHeader(f)
+	header, err := readHeader(f, st.Size())
 	if err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("failed to read header: %w", err)
@@ -58,7 +81,18 @@ func OpenReader(path string) (*Reader, error) {
 	return &Reader{
 		file:   f,
 		header: header,
+		size:   st.Size(),
 	}, nil
+}
+
+// NewReader parses the Smacker header and frame tables from r, which holds
+// size bytes. The returned Reader does not own r; Close is a no-op for it.
+func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
+	header, err := readHeader(r, size)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read header: %w", err)
+	}
+	return &Reader{header: header, size: size}, nil
 }
 
 // Close closes the reader
@@ -117,113 +151,122 @@ func (r *Reader) SignatureString() string {
 	return string([]byte{byte(s), byte(s >> 8), byte(s >> 16), byte(s >> 24)})
 }
 
-// HasAudio returns true if the video has any audio tracks
+// HasAudio reports whether any audio track is present, that is, whether any
+// track's packed audio word has the present bit set.
 func (r *Reader) HasAudio() bool {
-	for i := 0; i < 7; i++ {
-		if r.header.AudioFlags[i] != 0 {
-			return true
-		}
-	}
-	return false
+	return r.header.HasAudio()
 }
 
-// readHeader reads and parses the Smacker header
-func readHeader(f *os.File) (*Header, error) {
-	h := &Header{}
+// AudioTrack decodes audio track i (0 to AudioTrackCount-1). Out-of-range
+// indices return a zero AudioTrack carrying the index.
+func (r *Reader) AudioTrack(i int) AudioTrack {
+	return r.header.AudioTrack(i)
+}
 
-	// Read signature
-	if err := binary.Read(f, binary.LittleEndian, &h.Signature); err != nil {
+// AudioTracks returns the present audio tracks in index order.
+func (r *Reader) AudioTracks() []AudioTrack {
+	return r.header.AudioTracks()
+}
+
+// readHeader reads and parses the Smacker header, frame tables and Huffman
+// trees from r, which holds size bytes.
+func readHeader(r io.ReaderAt, size int64) (*Header, error) {
+	if size < HeaderSize {
+		return nil, fmt.Errorf("file is %d bytes, shorter than the %d-byte header", size, HeaderSize)
+	}
+	buf := make([]byte, HeaderSize)
+	if err := readAt(r, buf, 0); err != nil {
 		return nil, err
 	}
+	le := binary.LittleEndian
+	h := &Header{Signature: le.Uint32(buf[0:])}
 
 	// Verify signature
 	if h.Signature != SignatureSMK2 && h.Signature != SignatureSMK4 {
 		return nil, fmt.Errorf("invalid signature: 0x%08X (expected SMK2 or SMK4)", h.Signature)
 	}
 
-	// Read basic header fields
-	if err := binary.Read(f, binary.LittleEndian, &h.Width); err != nil {
-		return nil, err
+	h.Width = le.Uint32(buf[4:])
+	h.Height = le.Uint32(buf[8:])
+	h.Frames = le.Uint32(buf[12:])
+	h.FrameRate = int32(le.Uint32(buf[16:]))
+	h.Flags = le.Uint32(buf[20:])
+	for i := 0; i < AudioTrackCount; i++ {
+		h.AudioSize[i] = le.Uint32(buf[24+4*i:])
 	}
-	if err := binary.Read(f, binary.LittleEndian, &h.Height); err != nil {
-		return nil, err
+	h.TreesSize = le.Uint32(buf[52:])
+	h.MMapSize = le.Uint32(buf[56:])
+	h.MClrSize = le.Uint32(buf[60:])
+	h.FullSize = le.Uint32(buf[64:])
+	h.TypeSize = le.Uint32(buf[68:])
+	for i := 0; i < AudioTrackCount; i++ {
+		h.AudioRate[i] = le.Uint32(buf[72+4*i:])
+		h.AudioFlags[i] = h.AudioRate[i] >> 24
 	}
-	if err := binary.Read(f, binary.LittleEndian, &h.Frames); err != nil {
-		return nil, err
+	// Bytes 100-103 are an unused dword; the frame-size table follows.
+
+	entries := int64(h.Frames)
+	off := int64(HeaderSize)
+
+	// Frame-size table: one little-endian dword per frame.
+	table := make([]byte, 4*entries)
+	if err := readAt(r, table, off); err != nil {
+		return nil, fmt.Errorf("frame-size table: %w", err)
 	}
-	if err := binary.Read(f, binary.LittleEndian, &h.FrameRate); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(f, binary.LittleEndian, &h.Flags); err != nil {
-		return nil, err
+	off += int64(len(table))
+	h.FrameSizes = make([]uint32, entries)
+	for i := range h.FrameSizes {
+		h.FrameSizes[i] = le.Uint32(table[4*i:])
 	}
 
-	// Read audio info
-	for i := 0; i < 7; i++ {
-		if err := binary.Read(f, binary.LittleEndian, &h.AudioSize[i]); err != nil {
-			return nil, err
-		}
+	// Frame-type table: one byte per frame.
+	h.FrameTypes = make([]byte, entries)
+	if err := readAt(r, h.FrameTypes, off); err != nil {
+		return nil, fmt.Errorf("frame-type table: %w", err)
 	}
-
-	// Read tree sizes
-	if err := binary.Read(f, binary.LittleEndian, &h.TreesSize); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(f, binary.LittleEndian, &h.MMapSize); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(f, binary.LittleEndian, &h.MClrSize); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(f, binary.LittleEndian, &h.FullSize); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(f, binary.LittleEndian, &h.TypeSize); err != nil {
-		return nil, err
-	}
-
-	// Read audio rates and flags
-	for i := 0; i < 7; i++ {
-		if err := binary.Read(f, binary.LittleEndian, &h.AudioRate[i]); err != nil {
-			return nil, err
-		}
-	}
-
-	// Dummy field (4 bytes)
-	var dummy uint32
-	if err := binary.Read(f, binary.LittleEndian, &dummy); err != nil {
-		return nil, err
-	}
-
-	for i := 0; i < 7; i++ {
-		if err := binary.Read(f, binary.LittleEndian, &h.AudioFlags[i]); err != nil {
-			return nil, err
-		}
-	}
-
-	// Read frame sizes
-	h.FrameSizes = make([]uint32, h.Frames)
-	for i := uint32(0); i < h.Frames; i++ {
-		if err := binary.Read(f, binary.LittleEndian, &h.FrameSizes[i]); err != nil {
-			return nil, err
-		}
-	}
-
-	// Read frame types
-	h.FrameTypes = make([]byte, h.Frames)
-	if _, err := io.ReadFull(f, h.FrameTypes); err != nil {
-		return nil, err
-	}
+	off += entries
 
 	// Read Huffman trees
 	if h.TreesSize > 0 {
 		h.HuffmanTrees = make([]byte, h.TreesSize)
-		if _, err := io.ReadFull(f, h.HuffmanTrees); err != nil {
-			return nil, err
+		if err := readAt(r, h.HuffmanTrees, off); err != nil {
+			return nil, fmt.Errorf("huffman trees: %w", err)
 		}
 	}
 
 	return h, nil
+}
+
+// FrameDataOffset returns the file offset of the first frame's payload: the
+// header, the frame-size and frame-type tables and the Huffman trees come
+// before it.
+func (h *Header) FrameDataOffset() int64 {
+	return HeaderSize + 5*int64(len(h.FrameSizes)) + int64(h.TreesSize)
+}
+
+// FrameDataSize returns the total size of the frame payloads, summing every
+// frame-size table entry. The game uses each whole entry as the payload size.
+func (h *Header) FrameDataSize() uint64 {
+	var total uint64
+	for _, s := range h.FrameSizes {
+		total += uint64(s)
+	}
+	return total
+}
+
+// readAt fills buf from r at off, treating a short read as io.ErrUnexpectedEOF.
+func readAt(r io.ReaderAt, buf []byte, off int64) error {
+	if len(buf) == 0 {
+		return nil
+	}
+	n, err := r.ReadAt(buf, off)
+	if n == len(buf) {
+		return nil
+	}
+	if err == nil || errors.Is(err, io.EOF) {
+		return io.ErrUnexpectedEOF
+	}
+	return err
 }
 
 // Info returns a formatted string with video information
@@ -236,17 +279,10 @@ func (r *Reader) Info() string {
 	info += fmt.Sprintf("  Duration: %.2f seconds\n", r.Duration())
 	info += fmt.Sprintf("  Has Audio: %v\n", r.HasAudio())
 
-	if r.HasAudio() {
+	if tracks := r.AudioTracks(); len(tracks) > 0 {
 		info += "  Audio Tracks:\n"
-		for i := 0; i < 7; i++ {
-			if r.header.AudioFlags[i] != 0 {
-				channels := (r.header.AudioFlags[i] >> 16) & 0xFF
-				if channels == 0 {
-					channels = 1
-				}
-				info += fmt.Sprintf("    Track %d: %d Hz, %d channels\n",
-					i, r.header.AudioRate[i], channels)
-			}
+		for _, t := range tracks {
+			info += fmt.Sprintf("    Track %d: %s\n", t.Index, t)
 		}
 	}
 
