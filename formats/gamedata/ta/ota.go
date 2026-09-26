@@ -61,10 +61,18 @@ type GlobalHeader struct {
 	// ... up to the first missing number (see GameSchemas); other sections,
 	// such as [Schema0] without the space, are kept in Sections.
 	//
-	// A schema with an empty Key is written as [Schema N], N its index in
-	// Schemas; AddSchema names it after the highest number in use. The game
-	// ignores the SCHEMACOUNT key, which is kept in Remaining as written.
-	Schemas []Schema `tdf:"Schema "`
+	// Marshal writes each schema under its Key, as decoded. A schema with an
+	// empty Key is written as [Schema N], N the lowest number no other
+	// schema is named with, taking the unnamed schemas in order (see
+	// tdf.ElementNames); Schema and GameSchemas find it under that name.
+	// After removing or reordering schemas, RenumberSchemas (or RemoveSchema)
+	// names them Schema 0, Schema 1, ... again so the game finds them all.
+	//
+	// The game ignores the SCHEMACOUNT key. A decoded header keeps it as
+	// written, in Remaining (or keeps it absent); AddSchema, RemoveSchema
+	// and RenumberSchemas keep it in step. A header built in code is written
+	// with SCHEMACOUNT set to the number of schemas.
+	Schemas []Schema `tdf:"Schema ,repeats=SCHEMACOUNT"`
 }
 
 // GlobalHeader satisfies the shared common.GlobalHeader interface via its

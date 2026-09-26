@@ -3,6 +3,7 @@ package ta
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 
 	"github.com/coreprime/kbot-io/formats/gamedata/common"
@@ -55,26 +56,41 @@ func ReadMap(data []byte) (*Map, error) {
 	return &m, nil
 }
 
-// schemaName is the name Schemas[i] is written with: its Key, or "Schema i"
-// when the Key is empty.
-func (h *GlobalHeader) schemaName(i int) string {
-	if k := h.Schemas[i].Key; k != "" {
-		return k
+// schemaStem is the tag key of GlobalHeader.Schemas: Marshal names an unnamed
+// schema with it and a number.
+const schemaStem = "Schema "
+
+// schemaNames returns the names Marshal writes the schemas under: each Key,
+// or for an empty Key "Schema N" with N the lowest number no other schema is
+// named with (see tdf.ElementNames).
+func (h *GlobalHeader) schemaNames() []string {
+	names := make([]string, len(h.Schemas))
+	for i := range h.Schemas {
+		names[i] = h.Schemas[i].Key
 	}
-	return "Schema " + strconv.Itoa(i)
+	return tdf.ElementNames(schemaStem, names)
+}
+
+// findSchema returns the index of the first of names equal to "Schema n",
+// ignoring case, or -1.
+func findSchema(names []string, n int) int {
+	want := schemaStem + strconv.Itoa(n)
+	for i, name := range names {
+		if values.EqualFold(name, want) {
+			return i
+		}
+	}
+	return -1
 }
 
 // Schema returns the schema the game finds as "Schema n": the first of
 // Schemas whose name equals it ignoring case, or nil. Names are compared
 // exactly otherwise, so [Schema 00] or [Schema  1] is never found. A schema
-// with an empty Key counts under the name Marshal writes for it, "Schema i"
-// for Schemas[i].
+// with an empty Key counts under the name Marshal writes for it (see
+// Schemas).
 func (h *GlobalHeader) Schema(n int) *Schema {
-	want := "Schema " + strconv.Itoa(n)
-	for i := range h.Schemas {
-		if values.EqualFold(h.schemaName(i), want) {
-			return &h.Schemas[i]
-		}
+	if i := findSchema(h.schemaNames(), n); i >= 0 {
+		return &h.Schemas[i]
 	}
 	return nil
 }
@@ -83,13 +99,14 @@ func (h *GlobalHeader) Schema(n int) *Schema {
 // Schema 1, ... up to the first number with no such section, at most
 // MaxSchemas.
 func (h *GlobalHeader) GameSchemas() []*Schema {
+	names := h.schemaNames()
 	var out []*Schema
 	for n := 0; n < MaxSchemas; n++ {
-		s := h.Schema(n)
-		if s == nil {
+		i := findSchema(names, n)
+		if i < 0 {
 			break
 		}
-		out = append(out, s)
+		out = append(out, &h.Schemas[i])
 	}
 	return out
 }
@@ -104,9 +121,9 @@ func (h *GlobalHeader) UnreachableSchemas() []string {
 		reached[s] = true
 	}
 	var out []string
-	for i := range h.Schemas {
+	for i, name := range h.schemaNames() {
 		if !reached[&h.Schemas[i]] {
-			out = append(out, h.schemaName(i))
+			out = append(out, name)
 		}
 	}
 	for _, s := range h.Sections {
@@ -119,23 +136,103 @@ func (h *GlobalHeader) UnreachableSchemas() []string {
 
 // AddSchema appends s, naming it "Schema N" when its Key is empty, with N the
 // lowest number no schema uses, and returns a pointer to the stored schema. It
-// updates SCHEMACOUNT when the header has that key.
+// sets SCHEMACOUNT to the new number of schemas when the header has that key
+// or was decoded from a file (a header built in code gets the key when it is
+// written).
 func (h *GlobalHeader) AddSchema(s Schema) *Schema {
-	if s.Key == "" {
-		n := 0
-		for h.Schema(n) != nil {
-			n++
-		}
-		s.Key = "Schema " + strconv.Itoa(n)
-	}
 	h.Schemas = append(h.Schemas, s)
+	last := &h.Schemas[len(h.Schemas)-1]
+	names := h.schemaNames()
+	last.Key = names[len(names)-1]
+	h.syncSchemaCount()
+	return last
+}
+
+// RemoveSchema removes the schema the game finds as "Schema n" (see Schema)
+// and renumbers the rest with RenumberSchemas, so the game still finds every
+// one. It reports whether there was such a schema; without one nothing
+// changes.
+func (h *GlobalHeader) RemoveSchema(n int) bool {
+	i := findSchema(h.schemaNames(), n)
+	if i < 0 {
+		return false
+	}
+	h.Schemas = append(h.Schemas[:i:i], h.Schemas[i+1:]...)
+	h.RenumberSchemas()
+	return true
+}
+
+// RenumberSchemas names the schemas Schema 0, Schema 1, ... in order, so the
+// game finds every one of them (up to MaxSchemas), and sets SCHEMACOUNT as
+// AddSchema does. The schemas are first put in the order of the numbers they
+// are named with (as Marshal would write them), so the ones the game already
+// finds keep their numbers and order; schemas whose names the game cannot
+// find under any number (such as Schema 00), and later schemas with a number
+// already taken, follow in their current order. Afterwards Schemas[i] is Schema i, and pointers
+// taken into Schemas before the call may point at other schemas.
+func (h *GlobalHeader) RenumberSchemas() {
+	names := h.schemaNames()
+	type ranked struct {
+		s   Schema
+		n   int
+		num bool // named with a number the game can find, first of that number
+	}
+	seen := map[int]bool{}
+	list := make([]ranked, len(h.Schemas))
+	for i, name := range names {
+		n, ok := schemaNumber(name)
+		list[i] = ranked{s: h.Schemas[i], n: n, num: ok && !seen[n]}
+		if ok {
+			seen[n] = true
+		}
+	}
+	sort.SliceStable(list, func(a, b int) bool {
+		if list[a].num != list[b].num {
+			return list[a].num
+		}
+		return list[a].num && list[a].n < list[b].n
+	})
+	for i := range list {
+		list[i].s.Key = schemaStem + strconv.Itoa(i)
+		h.Schemas[i] = list[i].s
+	}
+	h.syncSchemaCount()
+}
+
+// schemaNumber returns N for a name the game can find as "Schema N": the
+// prefix in any case, then N written as a plain decimal number without
+// leading zeros.
+func schemaNumber(name string) (int, bool) {
+	if !values.HasPrefixFold(name, schemaStem) {
+		return 0, false
+	}
+	digits := name[len(schemaStem):]
+	if len(digits) > 9 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(digits)
+	if err != nil || n < 0 || strconv.Itoa(n) != digits {
+		return 0, false
+	}
+	return n, true
+}
+
+// syncSchemaCount sets SCHEMACOUNT to the number of schemas when the header
+// has the key, spelled as it is, or was decoded from a file without it.
+func (h *GlobalHeader) syncSchemaCount() {
+	count := strconv.Itoa(len(h.Schemas))
 	for k := range h.Remaining {
 		if values.EqualFold(k, "schemacount") {
-			h.Remaining[k] = strconv.Itoa(len(h.Schemas))
-			break
+			h.Remaining[k] = count
+			return
 		}
 	}
-	return &h.Schemas[len(h.Schemas)-1]
+	if h.Meta.Decoded() {
+		if h.Remaining == nil {
+			h.Remaining = map[string]string{}
+		}
+		h.Remaining["SCHEMACOUNT"] = count
+	}
 }
 
 // MultiplayerSchema returns the schema a skirmish or multiplayer game for this

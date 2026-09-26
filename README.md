@@ -92,7 +92,15 @@ cannot hold. The resolvers follow the game's lookups:
   players uses), `Schema.StartPositions` (`StartPosN` is player slot N-1,
   `StartPos0` and unnumbered entries included), `NumPlayersText` and
   `PlayerCounts` (numplayers is display text to the game). New schemas are
-  written as `[Schema N]`, with the space the game looks for.
+  written as `[Schema N]`, with the space the game looks for and a number no
+  other schema uses; `RenumberSchemas` and `RemoveSchema` name the schemas
+  `Schema 0`, `Schema 1`, .. again after an edit. `SCHEMACOUNT`, which the
+  game ignores, is kept as written, and a map built in code is written with
+  it.
+
+Decoded names are written back as they were. Entries built in code without
+a name get one no sibling uses (`[special0]`, `[unit0]`, `[feature0]`,
+`[MENUENTRY0]`, ...), never an unnamed `[]` section.
 
 `Check` methods and functions report what the game ignores or reads
 differently: text longer than its buffers, values outside the bits it keeps,

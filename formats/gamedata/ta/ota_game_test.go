@@ -212,17 +212,108 @@ func TestNewSchemasAreNamedWithASpace(t *testing.T) {
 	if !strings.Contains(out, "[Schema 0]") || !strings.Contains(out, "[Schema 1]") || strings.Contains(out, "[Schema0]") {
 		t.Errorf("schema names:\n%s", out)
 	}
-	if !strings.Contains(out, "[GlobalHeader]") || strings.Contains(out, "SCHEMACOUNT") {
+	// A map built in code carries SCHEMACOUNT, as retail maps do.
+	if !strings.Contains(out, "[GlobalHeader]") || !strings.Contains(out, "SCHEMACOUNT=2;") {
 		t.Errorf("header:\n%s", out)
 	}
 	back := readMap(t, out)
 	if len(back.Header.GameSchemas()) != 2 {
 		t.Errorf("the game finds %d schemas", len(back.Header.GameSchemas()))
 	}
+	if again := marshal(t, back); strings.Count(again, "SCHEMACOUNT") != 1 {
+		t.Errorf("SCHEMACOUNT after a round trip:\n%s", again)
+	}
 	m2 := readMap(t, "[GlobalHeader]{SCHEMACOUNT=1;[Schema 0]{Type=Easy;}}")
 	m2.Header.AddSchema(Schema{})
 	if out := marshal(t, m2); !strings.Contains(out, "SCHEMACOUNT=2;") || !strings.Contains(out, "[Schema 1]") {
 		t.Errorf("AddSchema:\n%s", out)
+	}
+}
+
+// A decoded header keeps SCHEMACOUNT as written, or keeps it absent, until a
+// schema helper changes the schemas.
+func TestDecodedSchemaCountIsKept(t *testing.T) {
+	wrong := readMap(t, "[GlobalHeader]{schemacount=5;[Schema 0]{Type=Easy;}}")
+	if out := marshal(t, wrong); !strings.Contains(out, "schemacount=5;") || strings.Count(strings.ToLower(out), "schemacount") != 1 {
+		t.Errorf("wrong count not kept:\n%s", out)
+	}
+	none := readMap(t, "[GlobalHeader]{[Schema 0]{Type=Easy;}}")
+	if out := marshal(t, none); strings.Contains(strings.ToLower(out), "schemacount") {
+		t.Errorf("count added to a map without one:\n%s", out)
+	}
+	none.Header.AddSchema(Schema{Type: "Hard"})
+	if out := marshal(t, none); !strings.Contains(out, "SCHEMACOUNT=2;") {
+		t.Errorf("AddSchema on a map without a count:\n%s", out)
+	}
+}
+
+// An unnamed schema takes a number no other schema has, and the game view
+// before writing matches the file written.
+func TestUnnamedSchemasTakeFreeNumbers(t *testing.T) {
+	var m Map
+	m.Header.Schemas = []Schema{{Key: "Schema 1", Type: "Network 2"}, {Type: "Network 1"}}
+	h := &m.Header
+	got := h.GameSchemas()
+	if len(got) != 2 || got[0].Type != "Network 1" || got[1].Type != "Network 2" {
+		t.Fatalf("game view before writing: %+v", got)
+	}
+	out := marshal(t, &m)
+	if strings.Count(out, "[Schema 1]") != 1 || strings.Count(out, "[Schema 0]") != 1 {
+		t.Errorf("names:\n%s", out)
+	}
+	back := readMap(t, out).Header.GameSchemas()
+	if len(back) != 2 || back[0].Type != "Network 1" || back[1].Type != "Network 2" {
+		t.Errorf("game view after reading back: %+v", back)
+	}
+	if s := h.AddSchema(Schema{}); s.Key != "Schema 2" {
+		t.Errorf("AddSchema named %q", s.Key)
+	}
+}
+
+func TestRemoveAndRenumberSchemas(t *testing.T) {
+	const src = "[GlobalHeader]{SCHEMACOUNT=3;[Schema 0]{Type=A;}[Schema 1]{Type=B;}[Schema 2]{Type=C;}}"
+	types := func(h *GlobalHeader) string {
+		var parts []string
+		for _, s := range h.GameSchemas() {
+			parts = append(parts, s.Type)
+		}
+		return strings.Join(parts, ",")
+	}
+
+	// Deleting from the slice leaves a gap the game stops at.
+	m := readMap(t, src)
+	m.Header.Schemas = m.Header.Schemas[1:]
+	if got := types(&m.Header); got != "" {
+		t.Errorf("after deleting Schema 0 the game finds %q", got)
+	}
+	m.Header.RenumberSchemas()
+	out := marshal(t, m)
+	if got := types(&readMap(t, out).Header); got != "B,C" || !strings.Contains(out, "SCHEMACOUNT=2;") {
+		t.Errorf("after RenumberSchemas the game finds %q:\n%s", got, out)
+	}
+
+	m = readMap(t, src)
+	if !m.Header.RemoveSchema(1) || m.Header.RemoveSchema(7) {
+		t.Error("RemoveSchema result")
+	}
+	if got := types(&m.Header); got != "A,C" || m.Header.Remaining["SCHEMACOUNT"] != "2" {
+		t.Errorf("after RemoveSchema(1): %q, count %q", got, m.Header.Remaining["SCHEMACOUNT"])
+	}
+
+	// Renumbering keeps the numbers the game already reads and puts the
+	// schemas it cannot reach after them.
+	m = readMap(t, "[GlobalHeader]{[Schema 1]{Type=B;}[Schema 00]{Type=X;}[Schema 0]{Type=A;}[schema 1]{Type=Y;}[Schema 4]{Type=C;}}")
+	m.Header.RenumberSchemas()
+	if got := types(&m.Header); got != "A,B,C,X,Y" {
+		t.Errorf("renumbered order %q", got)
+	}
+	for i, s := range m.Header.Schemas {
+		if s.Key != "Schema "+string(rune('0'+i)) {
+			t.Errorf("Schemas[%d] named %q", i, s.Key)
+		}
+	}
+	if u := m.Header.UnreachableSchemas(); len(u) != 0 {
+		t.Errorf("unreachable after renumbering: %v", u)
 	}
 }
 
