@@ -1,6 +1,9 @@
 package tak
 
-import "github.com/coreprime/kbot-io/formats/gamedata/common"
+import (
+	"github.com/coreprime/kbot-io/formats/gamedata/common"
+	"github.com/coreprime/kbot-io/formats/tdf"
+)
 
 // Effect is a top-level particle-effect class from gamedata/effects/effects.tdf
 // (e.g. [lightning], [fire]): the canvas size, particle budget and animation
@@ -27,6 +30,10 @@ type Effect struct {
 	Sections []common.Section `tdf:",sections"`
 
 	Remaining map[string]string `tdf:",remaining"`
+
+	// Meta records which keys the source had, in what order and with what
+	// text, so an explicit zero survives a round trip (see tdf.Meta).
+	Meta tdf.Meta `tdf:",meta"`
 }
 
 // EffectPalette is the [palette] sub-section of an Effect: an ordered list of
@@ -37,6 +44,13 @@ type EffectPalette struct {
 	Ramps []Ramp `tdf:"ramp"`
 
 	Remaining map[string]string `tdf:",remaining"`
+
+	// Sections preserves every other nested section, in order.
+	Sections []common.Section `tdf:",sections"`
+
+	// Meta records which keys the source had, in what order and with what
+	// text, so an explicit zero survives a round trip (see tdf.Meta).
+	Meta tdf.Meta `tdf:",meta"`
 }
 
 // Ramp is one [ramp] gradient: a start/end palette index paired with a start/end
@@ -50,4 +64,11 @@ type Ramp struct {
 	EndColor   *common.RGBString `tdf:"endcolor,omitempty"`
 
 	Remaining map[string]string `tdf:",remaining"`
+
+	// Sections preserves any section nested in the ramp.
+	Sections []common.Section `tdf:",sections"`
+
+	// Meta records which keys the source had, in what order and with what
+	// text, so an explicit zero survives a round trip (see tdf.Meta).
+	Meta tdf.Meta `tdf:",meta"`
 }
