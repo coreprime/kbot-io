@@ -395,3 +395,22 @@ func TestDecodeChunkRejectsForgedSizes(t *testing.T) {
 		}
 	}
 }
+
+func TestNamesWithSeparatorsAreUnreachable(t *testing.T) {
+	odd := &Entry{Name: `a\b`}
+	plain := &Entry{Name: "c"}
+	root := tree(odd, plain)
+	if odd.Reachable() || root.Find(odd.FullPath()) == odd {
+		t.Error(`a name containing '\' cannot be reached by a lookup`)
+	}
+	var seen []string
+	_ = root.WalkReachable(func(e *Entry) error {
+		if !e.IsDir {
+			seen = append(seen, e.Name)
+		}
+		return nil
+	})
+	if len(seen) != 1 || seen[0] != "c" {
+		t.Errorf("WalkReachable files = %q, want [c]", seen)
+	}
+}

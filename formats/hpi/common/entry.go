@@ -112,8 +112,9 @@ func (e *Entry) Walk(fn func(*Entry) error) error {
 // WalkReachable traverses, depth-first in stored order, only the entries a
 // lookup of their FullPath resolves to: the last of each group of
 // case-insensitively equal sibling names, below directories that are
-// themselves reachable. The receiver is visited first. For each reachable
-// file, Find(entry.FullPath()) returns that entry.
+// themselves reachable. A name containing '\' or '/' is never reachable,
+// since lookups split on both. The receiver is visited first. For each
+// reachable file, Find(entry.FullPath()) returns that entry.
 func (e *Entry) WalkReachable(fn func(*Entry) error) error {
 	if err := fn(e); err != nil {
 		return err
@@ -122,7 +123,7 @@ func (e *Entry) WalkReachable(fn func(*Entry) error) error {
 		return nil
 	}
 	for _, child := range e.Children {
-		if e.lastChild(child.Name) != child {
+		if !e.reaches(child) {
 			continue
 		}
 		if err := child.WalkReachable(fn); err != nil {
@@ -136,11 +137,16 @@ func (e *Entry) WalkReachable(fn func(*Entry) error) error {
 // to e itself.
 func (e *Entry) Reachable() bool {
 	for node := e; node.Parent != nil; node = node.Parent {
-		if !node.Parent.IsDir || node.Parent.lastChild(node.Name) != node {
+		if !node.Parent.IsDir || !node.Parent.reaches(node) {
 			return false
 		}
 	}
 	return true
+}
+
+// reaches reports whether a lookup of child's name in e resolves to child.
+func (e *Entry) reaches(child *Entry) bool {
+	return !strings.ContainsAny(child.Name, `\/`) && e.lastChild(child.Name) == child
 }
 
 // EqualFoldASCII reports whether a and b are equal when the ASCII letters
