@@ -170,6 +170,12 @@ func (f *Frame) FlagByte() uint8 { return f.flagB }
 
 // ParseTAF parses a TAF file from a byte slice. The format is pointer-based,
 // so the whole file must be available.
+//
+// Each frame gets its own copy of its pixels. Frame records may point at the
+// same pixel block, so to keep memory use in proportion to the input, the
+// pixel data of all frames together may not exceed len(data); a file whose
+// frames reuse pixel blocks beyond that is rejected. Every retail TAF stores
+// each frame's pixels once and stays well within this bound.
 func ParseTAF(data []byte) (*TAF, error) {
 	if len(data) < headerSize+4 {
 		return nil, fmt.Errorf("taf: file too small (%d bytes)", len(data))
@@ -221,6 +227,8 @@ func parseSequence(data []byte, off uint32) (*TAF, error) {
 	copy(taf.nameField[:], data[off+8:off+8+nameFieldLen])
 
 	listOff := off + sequenceHeaderLen
+	// budget is how many more pixel bytes the frames may copy in total.
+	budget := len(data)
 	for i := uint16(0); i < frameCount; i++ {
 		itemOff := listOff + uint32(i)*frameListItemSize
 		if int(itemOff)+frameListItemSize > len(data) {
@@ -229,7 +237,7 @@ func parseSequence(data []byte, off uint32) (*TAF, error) {
 		infoPtr := binary.LittleEndian.Uint32(data[itemOff:])
 		duration := binary.LittleEndian.Uint32(data[itemOff+4:])
 
-		frame, err := parseFrame(data, infoPtr, duration)
+		frame, err := parseFrame(data, infoPtr, duration, &budget)
 		if err != nil {
 			return nil, fmt.Errorf("taf: frame %d: %w", i, err)
 		}
@@ -238,7 +246,10 @@ func parseSequence(data []byte, off uint32) (*TAF, error) {
 	return taf, nil
 }
 
-func parseFrame(data []byte, off, duration uint32) (*Frame, error) {
+// parseFrame decodes the frame info record at off and copies its pixels,
+// taking their size from *budget and failing when the budget cannot cover
+// them.
+func parseFrame(data []byte, off, duration uint32, budget *int) (*Frame, error) {
 	if int(off)+frameInfoSize > len(data) {
 		return nil, fmt.Errorf("frame info out of range at 0x%X", off)
 	}
@@ -265,6 +276,11 @@ func parseFrame(data []byte, off, duration uint32) (*Frame, error) {
 	if int(pixelPtr)+size > len(data) {
 		return nil, fmt.Errorf("pixel data out of range at 0x%X (%d bytes)", pixelPtr, size)
 	}
+	if size > *budget {
+		return nil, fmt.Errorf("pixel data at 0x%X (%d bytes) brings the frames' pixel total past the %d-byte file size",
+			pixelPtr, size, len(data))
+	}
+	*budget -= size
 	pixels := make([]byte, size)
 	copy(pixels, data[pixelPtr:int(pixelPtr)+size])
 
