@@ -61,8 +61,10 @@
 //     primitives are textured, corner 0 at the texture's top-left texel and
 //     then clockwise; an uncoloured primitive with no texture is not drawn.
 //   - Object.HiddenPrimitive is the primitive the game never draws: the
-//     selection primitive when its index is in range, otherwise primitive 0
-//     for any selection value but -1.
+//     selection primitive, when its index is in range. For other values but
+//     -1 it names primitive 0; what the game does with such values has not
+//     been established, and in the retail models they occur only on objects
+//     with no primitives.
 //   - Object.DrawOrder is the order primitives are drawn in. Pieces are
 //     drawn from the last in AllObjects to the first (until a unit script
 //     reorders them), without a depth buffer, so a later coplanar face

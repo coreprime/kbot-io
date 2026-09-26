@@ -88,8 +88,9 @@ type Object struct {
 	YFromParent int32
 	ZFromParent int32
 	// SelectionPrim is the stored selection primitive index; -1 means none.
-	// Shipped child pieces also carry stale values. HiddenPrimitive applies
-	// the game's rule for which primitive it never draws.
+	// Retail models store indices on child pieces too, and a few objects with
+	// no primitives store a value other than -1. HiddenPrimitive reports which
+	// primitive is not drawn.
 	SelectionPrim int32
 	// Children are the objects on this object's child chain, in file order.
 	Children []*Object

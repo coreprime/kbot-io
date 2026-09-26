@@ -59,13 +59,17 @@ func (p Primitive) Style(textureFound bool) (FaceStyle, uint8) {
 	return FaceHidden, 0
 }
 
-// HiddenPrimitive returns the index of the primitive the game never draws
-// for this object, or -1 when it draws them all.
+// HiddenPrimitive returns the index of the object's primitive that is not
+// drawn, or -1 when every primitive is drawn.
 //
 // With SelectionPrim -1 or no primitives nothing is hidden. A selection index
-// inside the primitive list hides that primitive. Any other value, including a
-// stale index past the end of the list, hides primitive 0: the game moves an
-// in-range selection primitive into slot 0 and then never draws slot 0.
+// inside the primitive list hides that primitive: TA 3.1c moves it into slot
+// 0 and never draws slot 0. For any other value (an index at or past the end
+// of the list, or a negative value other than -1) HiddenPrimitive hides
+// primitive 0, the primitive left in slot 0; whether the game does the same
+// for such values has not been established. In the retail TA and TA: Kingdoms
+// models such values occur only on objects with no primitives, so no retail
+// model is affected either way.
 func (o *Object) HiddenPrimitive() int {
 	n := len(o.Primitives)
 	switch {
@@ -87,8 +91,8 @@ func (o *Object) HiddenPrimitive() int {
 // keeping their relative order on ties. The mean is the 32-bit wrapping sum of
 // the corners' Y divided by the corner count, truncated toward zero; a corner
 // whose index is past the vertex list adds nothing, and a primitive with no
-// corners has mean 0. The first entry is the slot the game skips whenever
-// HiddenPrimitive is not -1.
+// corners has mean 0. Whenever HiddenPrimitive is not -1, it is the first
+// entry.
 func (o *Object) DrawOrder() []int {
 	n := len(o.Primitives)
 	if n == 0 {
