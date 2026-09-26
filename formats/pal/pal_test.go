@@ -2,6 +2,7 @@ package pal
 
 import (
 	"bytes"
+	"errors"
 	"image/color"
 	"strings"
 	"testing"
@@ -85,8 +86,85 @@ func TestRenderSwatch(t *testing.T) {
 }
 
 func TestRejectsWrongSize(t *testing.T) {
-	if _, err := LoadFromBytes(make([]byte, 100)); err == nil {
-		t.Error("expected error for short palette")
+	if _, err := LoadFromBytes(make([]byte, 100)); !errors.Is(err, ErrShort) {
+		t.Errorf("100 bytes: err = %v, want ErrShort", err)
+	}
+	if _, err := LoadFromBytes(nil); !errors.Is(err, ErrEmpty) {
+		t.Errorf("empty: err = %v, want ErrEmpty", err)
+	}
+	if _, err := LoadFromReader(bytes.NewReader(nil)); !errors.Is(err, ErrEmpty) {
+		t.Errorf("empty stream: err = %v, want ErrEmpty", err)
+	}
+	if _, err := LoadFromReader(bytes.NewReader(make([]byte, 1023))); !errors.Is(err, ErrShort) {
+		t.Errorf("1023-byte stream: err = %v, want ErrShort", err)
+	}
+}
+
+func TestLongerFileUsesFirst1024Bytes(t *testing.T) {
+	data := append(append([]byte(nil), palettes.DefaultPalette...), 1, 2, 3, 4, 5, 6, 7, 8)
+	for name, load := range map[string]func() (*Palette, error){
+		"bytes":  func() (*Palette, error) { return LoadFromBytes(data) },
+		"reader": func() (*Palette, error) { return LoadFromReader(bytes.NewReader(data)) },
+	} {
+		p, err := load()
+		if err != nil {
+			t.Fatalf("%s: a 1032-byte palette should load: %v", name, err)
+		}
+		if !bytes.Equal(p.Raw, palettes.DefaultPalette) {
+			t.Errorf("%s: Raw should be the first 1024 bytes", name)
+		}
+		want, _ := LoadFromBytes(palettes.DefaultPalette)
+		if !p.Equals(want) {
+			t.Errorf("%s: colours differ from the first 1024 bytes", name)
+		}
+	}
+}
+
+func TestWriteUsesColorsAndKeepsFourthByte(t *testing.T) {
+	data := append([]byte(nil), palettes.DefaultPalette...)
+	data[5*4+3] = 7
+	p, err := LoadFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Colors[3] = color.RGBA{1, 2, 3, 255}
+	var buf bytes.Buffer
+	if err := p.Write(&buf); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.Bytes()
+	if len(out) != FileSize {
+		t.Fatalf("wrote %d bytes, want %d", len(out), FileSize)
+	}
+	if !bytes.Equal(out[12:15], []byte{1, 2, 3}) {
+		t.Errorf("edited entry 3 = %v, want [1 2 3]", out[12:15])
+	}
+	if out[5*4+3] != 7 {
+		t.Errorf("fourth byte of entry 5 = %d, want 7", out[5*4+3])
+	}
+	fresh := &Palette{Colors: p.Colors}
+	buf.Reset()
+	if err := fresh.Write(&buf); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Bytes()[5*4+3] != 0 {
+		t.Error("a palette without Raw should write zero fourth bytes")
+	}
+}
+
+func TestOpaqueColorModel(t *testing.T) {
+	p, _ := LoadFromBytes(palettes.DefaultPalette)
+	for i, c := range p.OpaqueColorModel() {
+		rgba := c.(color.RGBA)
+		if rgba.A != 255 {
+			t.Fatalf("index %d alpha = %d, want 255", i, rgba.A)
+		}
+		if rgba.R != p.Colors[i].R || rgba.G != p.Colors[i].G || rgba.B != p.Colors[i].B {
+			t.Fatalf("index %d colour changed", i)
+		}
+	}
+	if p.ColorModel()[0].(color.RGBA).A != 0 {
+		t.Error("ColorModel should keep index 0 transparent")
 	}
 }
 

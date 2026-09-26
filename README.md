@@ -21,7 +21,7 @@ depend on the format code without pulling in the full CLI.
   TA:K texture palettes.
 - **`testutil/`** — test helpers for locating optional unpacked game assets.
 
-### PCX images
+### PCX and palettes
 
 - `pcx` decodes to the PCX specification by default. `Reader.DecodeGame`
   (or `DecodeOptions{Mode: pcx.ModeGame}`) decodes a file the way TA 3.1c
@@ -29,6 +29,11 @@ depend on the format code without pulling in the full CLI.
   exactly `width` bytes whatever BytesPerLine says, and the palette taken from
   the last 768 bytes whether or not a 0x0C marker precedes it.
   `Reader.Compat` lists every way a file departs from those rules.
+- `pal` reads the first 1,024 bytes of a `.PAL`, as the game does, and
+  `pal.LoadNamed` falls back to `palettes/<name>.pcx` when the `.pal` is
+  missing or empty. `pal.Table` models the lookup tables at their real sizes:
+  PALETTE.ALP is 65,536 bytes (256 × 256 pair blends), PALETTE.SHD and
+  PALETTE.LHT are 8,192 bytes (32 rows of 256).
 
 ## Usage
 

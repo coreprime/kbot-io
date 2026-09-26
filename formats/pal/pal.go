@@ -1,6 +1,7 @@
 package pal
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -12,48 +13,70 @@ import (
 // EntryCount is the number of color entries in a TA palette (always 256).
 const EntryCount = 256
 
-// FileSize is the on-disk size in bytes of a TA palette file (256 × 4).
+// FileSize is the size in bytes of a TA palette (256 × 4). The game reads
+// exactly this many bytes from the start of a .PAL file.
 const FileSize = EntryCount * 4
 
-// Palette is a parsed TA .PAL file.  The Raw slice keeps the original bytes
-// so callers that care about the unused alpha byte (or want to round-trip the
-// file byte-for-byte) can recover it.
+// ErrEmpty is returned for an empty palette file. The game then takes the
+// palette from the PCX of the same name instead; see LoadNamed and FromPCX.
+var ErrEmpty = errors.New("pal: empty palette file")
+
+// ErrShort is returned for a palette file of 1 to 1,023 bytes. The game reads
+// 1,024 bytes regardless, past the end of such a file, so it has no usable
+// palette.
+var ErrShort = errors.New("pal: palette file shorter than 1024 bytes")
+
+// Palette is a parsed TA .PAL file. Raw keeps the 1,024 bytes the colours
+// came from so the unused fourth byte of each entry survives a round trip.
 type Palette struct {
 	Colors [EntryCount]color.RGBA
 	Raw    []byte
 }
 
-// LoadFromReader parses a .PAL file from r.
-//
-// Color index 0 is reported with alpha=0 to match how every other kbot loader
-// treats the TA palette (the engine uses index 0 as the transparent sentinel).
-// All other entries are returned fully opaque.
-func LoadFromReader(r io.Reader) (*Palette, error) {
-	raw := make([]byte, FileSize)
-	if _, err := io.ReadFull(r, raw); err != nil {
-		return nil, fmt.Errorf("read palette: %w", err)
-	}
-	p := &Palette{Raw: raw}
-	for i := 0; i < EntryCount; i++ {
-		off := i * 4
-		p.Colors[i] = color.RGBA{R: raw[off], G: raw[off+1], B: raw[off+2], A: 255}
-	}
-	p.Colors[0].A = 0
-	return p, nil
-}
-
-// LoadFromBytes parses a .PAL file from a byte slice.
-func LoadFromBytes(data []byte) (*Palette, error) {
-	if len(data) != FileSize {
-		return nil, fmt.Errorf("invalid palette size: expected %d bytes, got %d", FileSize, len(data))
-	}
-	p := &Palette{Raw: append([]byte(nil), data...)}
+// fromEntries builds a Palette from the first FileSize bytes of data.
+func fromEntries(data []byte) *Palette {
+	p := &Palette{Raw: append([]byte(nil), data[:FileSize]...)}
 	for i := 0; i < EntryCount; i++ {
 		off := i * 4
 		p.Colors[i] = color.RGBA{R: data[off], G: data[off+1], B: data[off+2], A: 255}
 	}
 	p.Colors[0].A = 0
-	return p, nil
+	return p
+}
+
+// LoadFromReader parses a .PAL file from r, reading only the first 1,024
+// bytes as the game does. An empty stream fails with ErrEmpty and a shorter
+// one with ErrShort.
+//
+// Color index 0 is reported with alpha=0 to match how every other kbot loader
+// treats the TA palette (sprites use index 0 as the transparent key); use
+// OpaqueColorModel for terrain and backdrops, which the game draws opaque.
+// All other entries are returned fully opaque.
+func LoadFromReader(r io.Reader) (*Palette, error) {
+	raw := make([]byte, FileSize)
+	if n, err := io.ReadFull(r, raw); err != nil {
+		switch {
+		case errors.Is(err, io.EOF):
+			return nil, fmt.Errorf("read palette: %w", ErrEmpty)
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			return nil, fmt.Errorf("read palette: %w (got %d)", ErrShort, n)
+		}
+		return nil, fmt.Errorf("read palette: %w", err)
+	}
+	return fromEntries(raw), nil
+}
+
+// LoadFromBytes parses a .PAL file from a byte slice. As in the game, the
+// first 1,024 bytes are used and any further bytes are ignored. Empty data
+// fails with ErrEmpty and 1 to 1,023 bytes with ErrShort.
+func LoadFromBytes(data []byte) (*Palette, error) {
+	switch {
+	case len(data) == 0:
+		return nil, fmt.Errorf("invalid palette: %w", ErrEmpty)
+	case len(data) < FileSize:
+		return nil, fmt.Errorf("invalid palette size: %w (got %d)", ErrShort, len(data))
+	}
+	return fromEntries(data), nil
 }
 
 // LoadFromFile parses a .PAL file at path.
@@ -66,32 +89,45 @@ func LoadFromFile(path string) (*Palette, error) {
 	return LoadFromReader(f)
 }
 
-// Write encodes p back to a .PAL file.  When Raw is set (e.g. for a palette
-// loaded with LoadFromReader) the original bytes are emitted verbatim so any
-// unused alpha bytes are preserved.  Otherwise the alpha byte for every entry
-// is zero — matching Cavedog's files.
+// Write encodes p as a 1,024-byte .PAL file. The colours come from Colors;
+// the unused fourth byte of each entry is taken from Raw when it holds a full
+// palette (so a loaded file round-trips byte for byte) and is zero otherwise,
+// matching Cavedog's files.
 func (p *Palette) Write(w io.Writer) error {
-	if len(p.Raw) == FileSize {
-		_, err := w.Write(p.Raw)
-		return err
-	}
 	buf := make([]byte, FileSize)
+	keep := len(p.Raw) >= FileSize
 	for i := 0; i < EntryCount; i++ {
 		off := i * 4
 		buf[off] = p.Colors[i].R
 		buf[off+1] = p.Colors[i].G
 		buf[off+2] = p.Colors[i].B
-		// buf[off+3] stays zero — matches Cavedog files.
+		if keep {
+			buf[off+3] = p.Raw[off+3]
+		}
 	}
 	_, err := w.Write(buf)
 	return err
 }
 
-// ColorModel returns the palette as a Go image/color Palette.
+// ColorModel returns the palette as a Go image/color Palette, with index 0
+// transparent (the sprite convention).
 func (p *Palette) ColorModel() color.Palette {
 	out := make(color.Palette, EntryCount)
 	for i := 0; i < EntryCount; i++ {
 		out[i] = p.Colors[i]
+	}
+	return out
+}
+
+// OpaqueColorModel returns the palette as a Go image/color Palette with every
+// entry opaque, index 0 included. The game draws terrain, minimaps and
+// backdrops this way; only sprites treat index 0 as transparent.
+func (p *Palette) OpaqueColorModel() color.Palette {
+	out := make(color.Palette, EntryCount)
+	for i := 0; i < EntryCount; i++ {
+		c := p.Colors[i]
+		c.A = 255
+		out[i] = c
 	}
 	return out
 }

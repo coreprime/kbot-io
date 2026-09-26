@@ -3,9 +3,25 @@
 //
 // # Palettes
 //
-// A TA palette is a 1,024-byte blob: 256 entries of 4 bytes, R, G, B and a
-// fourth byte the game does not use (always 0 in Cavedog's files). Color
-// index 0 acts as transparent.
+// A TA palette is 256 entries of 4 bytes: R, G, B and a fourth byte the game
+// does not use (always 0 in Cavedog's files). The game loads a named palette
+// from palettes/<name>.PAL as follows, and LoadNamed does the same:
+//
+//   - A file of 1,024 bytes or more: the first 1,024 bytes are the palette
+//     and the rest is ignored. LoadFromBytes and LoadFromReader accept such
+//     files.
+//   - An empty or missing file: the palette is taken from
+//     palettes/<name>.PCX instead, from the last 768 bytes of that file (see
+//     FromPCX and the pcx package). TA 3.1c then wrote those colours back as
+//     the .PAL and deleted PALETTE.ALP, .SHD and .LHT so that they were
+//     rebuilt for the new colours.
+//   - A file of 1 to 1,023 bytes is not a usable palette: the game reads
+//     1,024 bytes regardless, past its end. The loaders return ErrShort and,
+//     like the game, do not fall back to the PCX.
+//
+// Palettes decoded here report index 0 with alpha 0, the key colour sprites
+// treat as transparent. The game draws terrain, minimaps and backdrops opaque,
+// so use Palette.OpaqueColorModel for those.
 //
 // # Lookup tables
 //
