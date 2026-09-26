@@ -397,28 +397,35 @@ func (sp *Special) BuildPriorityNumber() int {
 	return int(int16(tdf.Atol(sp.BuildPriority)))
 }
 
-// Add appends e to the specials, naming it special<N> (N its index) when its
-// Key is empty, and returns a pointer to the stored entry.
+// Add appends e to the specials, naming it special<N> when its Key is empty
+// (N the lowest number no entry is named with, as Marshal would name it), and
+// returns a pointer to the stored entry.
 func (s *Specials) Add(e Special) *Special {
 	return addItem(&s.Items, "special", e)
 }
 
-// Add appends e to the units, naming it unit<N> when its Key is empty.
+// Add appends e to the units, naming it unit<N> when its Key is empty (see
+// Specials.Add).
 func (u *Units) Add(e Special) *Special {
 	return addItem(&u.Items, "unit", e)
 }
 
-// Add appends e to the features, naming it feature<N> when its Key is empty.
+// Add appends e to the features, naming it feature<N> when its Key is empty
+// (see Specials.Add).
 func (f *Features) Add(e Special) *Special {
 	return addItem(&f.Items, "feature", e)
 }
 
 func addItem(items *[]Special, stem string, e Special) *Special {
-	if e.Key == "" {
-		e.Key = stem + strconv.Itoa(len(*items))
-	}
 	*items = append(*items, e)
-	return &(*items)[len(*items)-1]
+	names := make([]string, len(*items))
+	for i := range *items {
+		names[i] = (*items)[i].Key
+	}
+	names = tdf.ElementNames(stem, names)
+	last := &(*items)[len(*items)-1]
+	last.Key = names[len(names)-1]
+	return last
 }
 
 // Check reports what the game ignores or reads differently in the map: no

@@ -2,6 +2,7 @@ package common
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/coreprime/kbot-io/formats/gamedata/internal/values"
 	"github.com/coreprime/kbot-io/formats/tdf"
@@ -27,8 +28,10 @@ import (
 // Check reports entries the game would ignore or read differently.
 type DownloadFile struct {
 	// Entries holds every section of the file in order, whatever its name
-	// (the game reads sections by position, not by name).
-	Entries []MenuEntry `tdf:",sections"`
+	// (the game reads sections by position, not by name). An entry with an
+	// empty Key is written as [MENUENTRY<n>], n the lowest number from 0 no
+	// other entry is named with.
+	Entries []MenuEntry `tdf:"MENUENTRY,sections"`
 
 	// Remaining preserves any key=value outside the sections.
 	Remaining map[string]string `tdf:",remaining"`
@@ -42,8 +45,8 @@ type DownloadFile struct {
 // page and slot it lands on.
 type MenuEntry struct {
 	// Key is the section's name, such as MENUENTRY1. The game ignores it; a
-	// new entry with an empty Key is written as an unnamed section, which
-	// AddEntry avoids by naming it.
+	// new entry with an empty Key is written as [MENUENTRY<n>] (see
+	// DownloadFile.Entries), and AddEntry names it as retail files do.
 	Key string `tdf:",name"`
 
 	UnitMenu string `tdf:"unitmenu,omitempty"`
@@ -82,11 +85,21 @@ func (d *DownloadFile) Menus() []MenuEntry {
 	return d.Entries
 }
 
-// AddEntry appends e, naming it MENUENTRY<n> (n counting from 1) when its Key
-// is empty, and returns a pointer to the stored entry.
+// AddEntry appends e, naming it MENUENTRY<n> when its Key is empty, with n
+// counting from 1 as in retail files (the number of entries after adding it,
+// or the next number no other entry is named with), and returns a pointer to
+// the stored entry.
 func (d *DownloadFile) AddEntry(e MenuEntry) *MenuEntry {
 	if e.Key == "" {
-		e.Key = fmt.Sprintf("MENUENTRY%d", len(d.Entries)+1)
+		used := map[string]bool{}
+		for _, other := range d.Entries {
+			used[strings.ToUpper(other.Key)] = true
+		}
+		n := len(d.Entries) + 1
+		for used[fmt.Sprintf("MENUENTRY%d", n)] {
+			n++
+		}
+		e.Key = fmt.Sprintf("MENUENTRY%d", n)
 	}
 	d.Entries = append(d.Entries, e)
 	return &d.Entries[len(d.Entries)-1]

@@ -79,8 +79,10 @@ type MapData struct {
 // Specials is the [specials] subsection: start positions and scripted markers
 // ([special0], [special1], ...).
 type Specials struct {
-	// Items holds every child section in order, whatever its name.
-	Items []Placement `tdf:",sections"`
+	// Items holds every child section in order, whatever its name. An
+	// entry with an empty Key is written as [special<N>], N the lowest number
+	// no other entry is named with.
+	Items []Placement `tdf:"special,sections"`
 
 	// Remaining preserves any other key=value so the file round-trips.
 	Remaining map[string]string `tdf:",remaining"`
@@ -91,8 +93,10 @@ type Specials struct {
 
 // Units is the [units] subsection: pre-placed units ([unit0], [unit1], ...).
 type Units struct {
-	// Items holds every child section in order, whatever its name.
-	Items []Placement `tdf:",sections"`
+	// Items holds every child section in order, whatever its name. An
+	// entry with an empty Key is written as [unit<N>], N the lowest number
+	// no other entry is named with.
+	Items []Placement `tdf:"unit,sections"`
 
 	// Remaining preserves any other key=value so the file round-trips.
 	Remaining map[string]string `tdf:",remaining"`
@@ -102,8 +106,9 @@ type Units struct {
 }
 
 // Placement is one [specialN] or [unitN] entry on a TA:Kingdoms map. A new
-// entry with an empty Key is written as an unnamed section; Specials.Add and
-// Units.Add name it.
+// entry with an empty Key is written as [special<N>] or [unit<N>], N the
+// lowest number no other entry of its list is named with; Specials.Add and
+// Units.Add give it that name when adding it.
 type Placement struct {
 	Key string `tdf:",name"` // section header, e.g. "unit0"
 
@@ -137,19 +142,25 @@ type Placement struct {
 	Meta tdf.Meta `tdf:",meta"`
 }
 
-// Add appends p to the specials, naming it special<N> (N its index) when its
-// Key is empty, and returns a pointer to the stored entry.
+// Add appends p to the specials, naming it special<N> when its Key is empty
+// (N the lowest number no entry is named with, as Marshal would name it), and
+// returns a pointer to the stored entry.
 func (s *Specials) Add(p Placement) *Placement { return addPlacement(&s.Items, "special", p) }
 
-// Add appends p to the units, naming it unit<N> when its Key is empty.
+// Add appends p to the units, naming it unit<N> when its Key is empty (see
+// Specials.Add).
 func (u *Units) Add(p Placement) *Placement { return addPlacement(&u.Items, "unit", p) }
 
 func addPlacement(items *[]Placement, stem string, p Placement) *Placement {
-	if p.Key == "" {
-		p.Key = fmt.Sprintf("%s%d", stem, len(*items))
-	}
 	*items = append(*items, p)
-	return &(*items)[len(*items)-1]
+	names := make([]string, len(*items))
+	for i := range *items {
+		names[i] = (*items)[i].Key
+	}
+	names = tdf.ElementNames(stem, names)
+	last := &(*items)[len(*items)-1]
+	last.Key = names[len(names)-1]
+	return last
 }
 
 // ErrNoGlobalHeader is returned by ReadMap for text with no [GlobalHeader]

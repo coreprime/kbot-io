@@ -119,8 +119,9 @@ type Schema struct {
 // other placed entries ([special0], [special1], ...).
 type Specials struct {
 	// Items holds every child section in order, whatever its name: the game
-	// reads the children by position.
-	Items []Special `tdf:",sections"`
+	// reads the children by position. An entry with an empty Key is written
+	// as [special<N>], N the lowest number no other entry is named with.
+	Items []Special `tdf:"special,sections"`
 
 	// Remaining preserves any other key=value so the file round-trips.
 	Remaining map[string]string `tdf:",remaining"`
@@ -133,8 +134,9 @@ type Specials struct {
 // [unit1], ...). Entries share the placement fields of Special.
 type Units struct {
 	// Items holds every child section in order, whatever its name: the game
-	// reads the children by position.
-	Items []Special `tdf:",sections"`
+	// reads the children by position. An entry with an empty Key is written
+	// as [unit<N>], N the lowest number no other entry is named with.
+	Items []Special `tdf:"unit,sections"`
 
 	// Remaining preserves any other key=value so the file round-trips.
 	Remaining map[string]string `tdf:",remaining"`
@@ -147,8 +149,9 @@ type Units struct {
 // ([feature0], [feature1], ...). Entries share the placement fields of Special.
 type Features struct {
 	// Items holds every child section in order, whatever its name: the game
-	// reads the children by position.
-	Items []Special `tdf:",sections"`
+	// reads the children by position. An entry with an empty Key is written
+	// as [feature<N>], N the lowest number no other entry is named with.
+	Items []Special `tdf:"feature,sections"`
 
 	// Remaining preserves any other key=value so the file round-trips.
 	Remaining map[string]string `tdf:",remaining"`
@@ -158,9 +161,10 @@ type Features struct {
 }
 
 // Special is one [specialN] entry: a unit, feature or start position placed on
-// the map. A new entry with an empty Key is written as an unnamed section,
-// which the game reads like any other (it goes by position); Specials.Add,
-// Units.Add and Features.Add name it.
+// the map. The game goes by the entries' positions, not their names. A new
+// entry with an empty Key is written as [special<N>], [unit<N>] or
+// [feature<N>], N the lowest number no other entry of its list is named with;
+// Specials.Add, Units.Add and Features.Add give it that name when adding it.
 type Special struct {
 	Key string `tdf:",name"` // section header, e.g. "special0"
 

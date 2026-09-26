@@ -94,8 +94,37 @@ func TestMapKeepsOddlyNamedChildren(t *testing.T) {
 		t.Errorf("warnings for a TA: Kingdoms map: %v", w)
 	}
 	p := md.Units.Add(Placement{UnitName: "X"})
-	if p.Key != "unit1" {
+	if p.Key != "unit0" {
 		t.Errorf("Add named %q", p.Key)
+	}
+}
+
+// Placements built in code without a name are written with one, never as an
+// unnamed [] section, and read back unchanged.
+func TestUnnamedPlacementsAreNamed(t *testing.T) {
+	m := Map{Header: GlobalHeader{MapData: &MapData{
+		Specials: &Specials{Items: []Placement{{SpecialWhat: "StartPos1", XPos: 5}, {SpecialWhat: "StartPos2"}}},
+		Units:    &Units{Items: []Placement{{Key: "unit0", UnitName: "A"}, {UnitName: "B"}}},
+	}}}
+	out := marshal(t, &m)
+	if strings.Contains(out, "[]") {
+		t.Fatalf("unnamed section written:\n%s", out)
+	}
+	for _, want := range []string{"[Map Data]", "[special0]", "[special1]", "[unit0]", "[unit1]"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s:\n%s", want, out)
+		}
+	}
+	back, err := ReadMap([]byte(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	md := back.Header.MapData
+	if len(md.Specials.Items) != 2 || md.Specials.Items[0].XPos != 5 || md.Units.Items[1].Key != "unit1" || md.Units.Items[1].UnitName != "B" {
+		t.Fatalf("read back: %+v %+v", md.Specials.Items, md.Units.Items)
+	}
+	if again := marshal(t, back); again != out {
+		t.Errorf("second write differs:\n%s\n---\n%s", out, again)
 	}
 }
 

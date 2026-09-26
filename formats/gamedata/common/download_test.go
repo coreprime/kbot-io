@@ -52,6 +52,37 @@ func TestDownloadFileKeepsEverySection(t *testing.T) {
 	}
 }
 
+// Entries built in code without a name are written as [MENUENTRY<n>], never
+// as an unnamed [] section, and read back unchanged.
+func TestUnnamedDownloadEntriesAreNamed(t *testing.T) {
+	d := DownloadFile{Entries: []MenuEntry{
+		{UnitMenu: "ARMCOM", UnitName: "ARMFARK"},
+		{Key: "MENUENTRY0", UnitMenu: "ARMCK", UnitName: "ARMFARK"},
+	}}
+	out, err := tdf.Marshal(&d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Contains(s, "[]") || !strings.Contains(s, "[MENUENTRY1]") || strings.Count(s, "[MENUENTRY0]") != 1 {
+		t.Fatalf("names:\n%s", s)
+	}
+	var back DownloadFile
+	if err := tdf.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Entries) != 2 || back.Entries[0].Key != "MENUENTRY1" || back.Entries[0].UnitMenu != "ARMCOM" {
+		t.Fatalf("read back: %+v", back.Entries)
+	}
+	again, err := tdf.Marshal(&back)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != s {
+		t.Errorf("second write differs:\n%s\n---\n%s", s, again)
+	}
+}
+
 func TestWarningString(t *testing.T) {
 	w := Warning{Section: "GlobalHeader/Schema 1", Key: "type", Message: "m"}
 	if w.String() != "[GlobalHeader/Schema 1] type: m" {

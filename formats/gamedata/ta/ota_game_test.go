@@ -226,6 +226,39 @@ func TestNewSchemasAreNamedWithASpace(t *testing.T) {
 	}
 }
 
+// Placed entries built in code without a name are written with one, never as
+// an unnamed [] section, and read back unchanged.
+func TestUnnamedPlacementsAreNamed(t *testing.T) {
+	var m Map
+	m.Header.Schemas = []Schema{{
+		Type:     "Network 1",
+		Specials: &Specials{Items: []Special{{SpecialWhat: "StartPos1", XPos: 5}, {Key: "special0", SpecialWhat: "StartPos2"}}},
+		Units:    &Units{Items: []Special{{UnitName: "ARMCOM"}}},
+		Features: &Features{Items: []Special{{FeatureName: "Rock", XPos: 1, ZPos: 2}}},
+	}}
+	out := marshal(t, &m)
+	if strings.Contains(out, "[]") {
+		t.Fatalf("unnamed section written:\n%s", out)
+	}
+	for _, want := range []string{"[special1]", "[special0]", "[unit0]", "[feature0]"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s:\n%s", want, out)
+		}
+	}
+	back := readMap(t, out)
+	s := back.Header.Schema(0)
+	if s == nil || len(s.Specials.Items) != 2 || s.Specials.Items[0].Key != "special1" ||
+		s.Specials.Items[0].XPos != 5 || s.Units.Items[0].UnitName != "ARMCOM" || len(s.GameFeatures()) != 1 {
+		t.Fatalf("read back: %+v", s)
+	}
+	if again := marshal(t, back); again != out {
+		t.Errorf("second write differs:\n%s\n---\n%s", out, again)
+	}
+	if p := s.Specials.Add(Special{SpecialWhat: "StartPos3"}); p.Key != "special2" {
+		t.Errorf("Add named %q", p.Key)
+	}
+}
+
 func TestMapSettersWriteFractionsAndText(t *testing.T) {
 	m := readMap(t, "[GlobalHeader]{numplayers=2, 3;tidalstrength=20;[Schema 0]{MeteorInterval=5;}}")
 	h := &m.Header
