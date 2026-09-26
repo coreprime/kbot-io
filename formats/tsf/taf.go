@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 )
 
@@ -272,9 +273,13 @@ func (t *TAF) Bytes() ([]byte, error) {
 	infoOff := listOff + uint32(frameCount*frameListItemSize)
 	pixOff := infoOff + uint32(frameCount*frameInfoSize)
 
-	total := pixOff
+	var pixelBytes uint64
 	for _, f := range t.Frames {
-		total += uint32(len(f.Pixels))
+		pixelBytes += uint64(len(f.Pixels))
+	}
+	total, err := serializedSize(pixOff, pixelBytes)
+	if err != nil {
+		return nil, err
 	}
 
 	out := make([]byte, total)
@@ -314,6 +319,17 @@ func (t *TAF) Bytes() ([]byte, error) {
 	}
 
 	return out, nil
+}
+
+// serializedSize returns the size of a TAF whose pixel data starts at pixOff
+// and holds pixelBytes bytes. Offsets are 32-bit, so the whole file must fit
+// in 4 GiB.
+func serializedSize(pixOff uint32, pixelBytes uint64) (uint64, error) {
+	total := uint64(pixOff) + pixelBytes
+	if total > math.MaxUint32 {
+		return 0, fmt.Errorf("taf: animation needs %d bytes, more than 32-bit offsets can address", total)
+	}
+	return total, nil
 }
 
 func (f *Frame) validate() error {
