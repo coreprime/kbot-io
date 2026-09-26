@@ -89,6 +89,12 @@ func TestParseAllVideos(t *testing.T) {
 		if r.FrameRate() <= 0 {
 			t.Errorf("%s: frame rate %.2f", filepath.Base(path), r.FrameRate())
 		}
+		if err := r.Validate(smacker.DefaultLimits()); err != nil {
+			t.Errorf("%s: Validate: %v", filepath.Base(path), err)
+		}
+		if r.Version() != 2 {
+			t.Errorf("%s: version %d, want 2", filepath.Base(path), r.Version())
+		}
 		// The shipped movies store their payloads back to back after the
 		// tables and trees, ending exactly at the end of the file.
 		if st, err := os.Stat(path); err == nil {

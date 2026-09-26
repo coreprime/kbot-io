@@ -328,7 +328,11 @@ func readAt(r io.ReaderAt, buf []byte, off int64) error {
 // Info returns a formatted string with video information
 func (r *Reader) Info() string {
 	info := "Smacker Video File\n"
-	info += fmt.Sprintf("  Signature: %s\n", r.SignatureString())
+	if r.Version() == 2 {
+		info += fmt.Sprintf("  Signature: %s\n", r.SignatureString())
+	} else {
+		info += fmt.Sprintf("  Signature: %s (TA plays SMK2 only)\n", r.SignatureString())
+	}
 	info += fmt.Sprintf("  Resolution: %dx%d\n", r.Width(), r.Height())
 	info += fmt.Sprintf("  Frames: %d\n", r.FrameCount())
 	if r.HasRingFrame() {
