@@ -14,6 +14,7 @@ import (
 type Assembler struct {
 	version    int
 	numStatics int
+	field5     uint32
 	pieceNames []string
 	soundNames []string // TA: Kingdoms per-COB sound-name table
 	scripts    []*assembledScript
@@ -35,6 +36,7 @@ func NewAssembler() *Assembler {
 //
 //	.version 4
 //	.statics 4
+//	.field5 0
 //	.piece base
 //	.piece turret
 //
@@ -42,7 +44,16 @@ func NewAssembler() *Assembler {
 //	0000  PUSH_CONST           0
 //	0004  RETURN
 //
-// Comments (lines starting with ; or //) are ignored.
+// Comments (lines starting with ; or //) are ignored. `.field5` sets
+// header field 5 (COB.UKZero, zero in every retail file); it is optional.
+//
+// Opcodes are written by mnemonic (see scripting.OpcodeByName). A low-bit
+// variant, which the game runs as its base instruction, is written as
+// NAME@0xXXXXXXXX and assembles to exactly that word; words no game
+// executes are written UNKNOWN_0xXXXXXXXX. The mnemonics of earlier
+// listings (MOD, BITWISE_XOR, BITWISE_NOT, LOGICAL_XOR, CREATE_LOCAL)
+// assemble to the words those listings meant, so an old listing reproduces
+// the original bytes.
 func (a *Assembler) Assemble(text string) (*scripting.COB, error) {
 	scanner := bufio.NewScanner(strings.NewReader(text))
 
@@ -128,6 +139,13 @@ func (a *Assembler) parseDirective(line string) error {
 		}
 		a.numStatics = v
 
+	case ".field5":
+		v, err := strconv.ParseUint(arg, 0, 32)
+		if err != nil {
+			return fmt.Errorf("bad .field5 value %q: %w", arg, err)
+		}
+		a.field5 = uint32(v)
+
 	case ".sound_name":
 		// TA: Kingdoms per-COB sound-name table. The argument is a
 		// Go-syntax quoted string (matches what the disassembler emits
@@ -202,7 +220,7 @@ func (a *Assembler) parseInstruction(line string) (*scripting.Instruction, error
 		operands = strings.TrimSpace(rest[spaceIdx+1:])
 	}
 
-	opcode, ok := scripting.OpcodeByName(opName)
+	word, ok := scripting.OpcodeByName(opName)
 	if !ok {
 		return nil, fmt.Errorf("unknown opcode %q at 0x%04X", opName, offset)
 	}
@@ -241,7 +259,8 @@ func (a *Assembler) parseInstruction(line string) (*scripting.Instruction, error
 
 	return &scripting.Instruction{
 		Offset:   uint32(offset),
-		Opcode:   opcode,
+		Opcode:   scripting.DispatchOpcode(word),
+		Raw:      word,
 		Operand:  op1,
 		Operand2: op2,
 	}, nil
@@ -274,8 +293,8 @@ func (a *Assembler) buildCOB() *scripting.COB {
 		indices[i] = uint32(len(code) / 4)
 
 		for _, inst := range s.Instructions {
-			code = appendU32(code, inst.Opcode)
-			pc := scripting.OpcodeParamCount(inst.Opcode)
+			code = appendU32(code, inst.Word())
+			pc := scripting.OpcodeParamCount(inst.Word())
 			if pc >= 1 {
 				code = appendU32(code, uint32(inst.Operand))
 			}
@@ -306,6 +325,7 @@ func (a *Assembler) buildCOB() *scripting.COB {
 		NumPieces:                     numPieces,
 		LengthOfScripts:               codeSize / 4,
 		NumberOfStaticVars:            uint32(a.numStatics),
+		UKZero:                        a.field5,
 		Code:                          code,
 		ScriptCodeIndices:             indices,
 		ScriptNames:                   names,

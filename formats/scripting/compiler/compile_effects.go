@@ -61,7 +61,9 @@ func (c *Compiler) compileExplode(line string) error {
 				flagValue |= val
 			} else {
 				// It's an expression, compile it
-				c.compileExpression(typeFlags)
+				if err := c.compileExpression(typeFlags); err != nil {
+					return err
+				}
 				c.emit(scripting.OP_EXPLODE, int32(pieceIdx))
 				return nil
 			}
@@ -96,7 +98,9 @@ func (c *Compiler) compileEmitSfx(line string) error {
 	}
 
 	// Push sfx type onto stack
-	c.compileExpression(sfxType)
+	if err := c.compileExpression(sfxType); err != nil {
+		return err
+	}
 
 	// Emit EMIT_SFX with piece#
 	c.emit(scripting.OP_EMIT_SFX, int32(pieceIdx))

@@ -39,21 +39,37 @@ func NewControlFlowAnalyzer(decompiler *Decompiler, instructions []scripting.Ins
 	}
 }
 
-// ProcessRange processes a range of instructions [start, end) and returns blocks
+// ProcessRange processes a range of instructions [start, end) and returns
+// the BOS lines for it.
+//
+// Jumps are only ever printed as the if, else and while blocks the compiler
+// turns back into the same jumps:
+//
+//	if:     cond; JUMP_IF_FALSE end; then...; end:
+//	else:   cond; JUMP_IF_FALSE else; then...; JUMP end; else: ...; end:
+//	while:  top: cond; JUMP_IF_FALSE end; body...; JUMP top; end:
+//
+// Any other jump (a forward JUMP that is not the end of a then-block, a
+// backward JUMP that is not the end of a loop, or a target outside the
+// enclosing block) cannot be written in BOS; the decompiler reports it
+// instead of dropping it.
 func (cfa *ControlFlowAnalyzer) ProcessRange(start, end int, indent int) []string {
 	var output []string
+	indentStr := strings.Repeat("\t", indent)
+	exprStart := start // first instruction of the expression being built
 	i := start
 
 	for i < end {
+		if cfa.stack.isEmpty() {
+			exprStart = i
+		}
 		// Check for RETURN
 		if cfa.instructions[i].Opcode == scripting.OP_RETURN {
 			// Process return value if on stack
 			if !cfa.stack.isEmpty() {
 				retval := cfa.stack.pop()
-				indentStr := strings.Repeat("\t", indent)
 				output = append(output, fmt.Sprintf("%sreturn %s;", indentStr, retval))
 			} else {
-				indentStr := strings.Repeat("\t", indent)
 				output = append(output, indentStr+"return;")
 			}
 			i++
@@ -61,19 +77,15 @@ func (cfa *ControlFlowAnalyzer) ProcessRange(start, end int, indent int) []strin
 		}
 		// Check for control flow patterns
 		if i+1 < end && cfa.instructions[i+1].Opcode == scripting.OP_JUMP_IF_FALSE {
-			// Potential if/while statement
-			block, nextI := cfa.processConditional(i, end, indent)
-			if block != nil {
-				output = append(output, block...)
-				i = nextI
-				continue
-			}
+			block, nextI := cfa.processConditional(exprStart, i, end, indent)
+			output = append(output, block...)
+			i = nextI
+			continue
 		}
 
 		// Regular statement
 		stmt := cfa.decompiler.translateInstruction(cfa.instructions[i], cfa.stack, cfa.paramNames, cfa.signalDef, cfa.globalNames)
 		if stmt != "" {
-			indentStr := strings.Repeat("\t", indent)
 			output = append(output, indentStr+stmt)
 		}
 		i++
@@ -82,103 +94,107 @@ func (cfa *ControlFlowAnalyzer) ProcessRange(start, end int, indent int) []strin
 	return output
 }
 
-// processConditional processes an if or while statement starting at index i
-// Returns the decompiled lines and the next instruction index to process
-func (cfa *ControlFlowAnalyzer) processConditional(i, end int, indent int) ([]string, int) {
-	if i+1 >= end {
-		return nil, i
-	}
-
-	// Translate condition instruction
+// processConditional processes the if, if/else or while statement whose
+// condition ends with instruction i (condStart is the first instruction of
+// the condition) and whose JUMP_IF_FALSE is instruction i+1. It returns the
+// decompiled lines and the next instruction index to process. When the
+// jumps do not form a block, it records the error and skips to end.
+func (cfa *ControlFlowAnalyzer) processConditional(condStart, i, end int, indent int) ([]string, int) {
+	d := cfa.decompiler
 	condInst := cfa.instructions[i]
-	stmt := cfa.decompiler.translateInstruction(condInst, cfa.stack, cfa.paramNames, cfa.signalDef, cfa.globalNames)
-	_ = stmt // Condition should be on stack
+	jif := cfa.instructions[i+1]
 
-	// Get JUMP_IF_FALSE
-	jumpIfFalse := cfa.instructions[i+1]
-	if jumpIfFalse.Opcode != scripting.OP_JUMP_IF_FALSE {
-		return nil, i
+	stmt := d.translateInstruction(condInst, cfa.stack, cfa.paramNames, cfa.signalDef, cfa.globalNames)
+	if stmt != "" || cfa.stack.isEmpty() {
+		d.fail("JUMP_IF_FALSE at 0x%04X does not follow a condition; use the disassembler", jif.Offset)
+		return nil, end
+	}
+	condition := cleanParentheses(cfa.stack.pop())
+
+	bodyStart := i + 2
+	exit, ok := cfa.jumpTarget(jif, bodyStart, end)
+	if !ok {
+		d.fail("JUMP_IF_FALSE at 0x%04X to 0x%04X does not end an if or while block; use the disassembler",
+			jif.Offset, targetOffset(jif))
+		return nil, end
 	}
 
-	// Get condition from stack
-	if cfa.stack.isEmpty() {
-		return nil, i
+	indentStr := strings.Repeat("\t", indent)
+	block := func(keyword string, from, to int) []string {
+		lines := []string{indentStr + keyword, indentStr + "{"}
+		lines = append(lines, cfa.ProcessRange(from, to, indent+1)...)
+		return append(lines, indentStr+"}")
 	}
-	condition := cfa.stack.pop()
 
-	// Calculate jump target (operand is absolute word offset)
-	targetOffset := uint32(jumpIfFalse.Operand * 4)
+	if exit > bodyStart {
+		last := cfa.instructions[exit-1]
+		if last.Opcode == scripting.OP_JUMP && targetOffset(last) <= uint64(condInst.Offset) {
+			// A backward JUMP ending the body: a while loop, which must
+			// jump back to the first instruction of its condition.
+			if targetOffset(last) != uint64(cfa.instructions[condStart].Offset) {
+				d.fail("JUMP at 0x%04X to 0x%04X does not return to the start of the loop condition; use the disassembler",
+					last.Offset, targetOffset(last))
+				return nil, end
+			}
+			return block(fmt.Sprintf("while (%s)", condition), bodyStart, exit-1), exit
+		}
+		if last.Opcode == scripting.OP_JUMP && targetOffset(last) > uint64(last.Offset) {
+			// A forward JUMP ending the then-block skips the else-block.
+			// One that goes straight to exit may instead end an inner
+			// if/else with an empty else-block, as in
+			// `if (a) { if (b) { x; } else { } }`; try that reading first.
+			if targetOffset(last) == cfa.offsetAt(exit) && d.err == nil {
+				saved := cfa.stack.snapshot()
+				if lines := block(fmt.Sprintf("if (%s)", condition), bodyStart, exit); d.err == nil {
+					return lines, exit
+				}
+				cfa.stack.restore(saved)
+				d.err = nil
+			}
+			elseEnd, ok := cfa.jumpTarget(last, exit, end)
+			if !ok {
+				d.fail("JUMP at 0x%04X to 0x%04X does not end an else block; use the disassembler",
+					last.Offset, targetOffset(last))
+				return nil, end
+			}
+			output := block(fmt.Sprintf("if (%s)", condition), bodyStart, exit-1)
+			output = append(output, block("else", exit, elseEnd)...)
+			return output, elseEnd
+		}
+	}
+	return block(fmt.Sprintf("if (%s)", condition), bodyStart, exit), exit
+}
 
-	// Find the instruction at targetOffset
-	elseStart := -1
-	for j := i + 2; j < end; j++ {
-		if uint32(cfa.instructions[j].Offset) >= targetOffset {
-			elseStart = j
+// targetOffset returns the code offset a jump goes to.
+func targetOffset(inst scripting.Instruction) uint64 {
+	return uint64(uint32(inst.Operand)) * 4
+}
+
+// offsetAt returns the code offset of instruction idx, or the offset just
+// past the last instruction when idx is len(instructions).
+func (cfa *ControlFlowAnalyzer) offsetAt(idx int) uint64 {
+	if idx < len(cfa.instructions) {
+		return uint64(cfa.instructions[idx].Offset)
+	}
+	last := cfa.instructions[len(cfa.instructions)-1]
+	return uint64(last.Offset) + 4*uint64(1+scripting.OpcodeParamCount(last.Word()))
+}
+
+// jumpTarget returns the index in [lo, hi] of the instruction a jump goes
+// to (hi meaning the end of the block), and false when the target is not an
+// instruction boundary in that range.
+func (cfa *ControlFlowAnalyzer) jumpTarget(jump scripting.Instruction, lo, hi int) (int, bool) {
+	target := targetOffset(jump)
+	for j := lo; j <= hi; j++ {
+		off := cfa.offsetAt(j)
+		if off == target {
+			return j, true
+		}
+		if off > target {
 			break
 		}
 	}
-
-	if elseStart == -1 {
-		elseStart = end // Jump goes past the end
-	}
-
-	// Look for backward jump (while loop)
-	thenEnd := elseStart
-	isWhileLoop := false
-	conditionOffset := uint32(condInst.Offset)
-
-	// Scan for JUMP in the then-block
-	for j := i + 2; j < elseStart; j++ {
-		if cfa.instructions[j].Opcode == scripting.OP_JUMP {
-			jumpTarget := uint32(cfa.instructions[j].Operand * 4)
-			if jumpTarget <= conditionOffset {
-				// Backward jump - this is a while loop
-				isWhileLoop = true
-				thenEnd = j // Don't include the JUMP in the body
-				break
-			}
-		}
-	}
-
-	// Clean condition
-	cleanCondition := cleanParentheses(condition)
-
-	// Check if this is always-true (should be unwrapped)
-	// NEVER treat if (1) as always-true - preserve for byte-perfect roundtrip!
-	isAlwaysTrue := false
-
-	var output []string
-	indentStr := strings.Repeat("\t", indent)
-
-	// Emit if/while header (unless it's always-true)
-	if !isAlwaysTrue {
-		if isWhileLoop {
-			output = append(output, fmt.Sprintf("%swhile (%s)", indentStr, cleanCondition))
-		} else {
-			output = append(output, fmt.Sprintf("%sif (%s)", indentStr, cleanCondition))
-		}
-		output = append(output, indentStr+"{")
-	}
-
-	// Recursively process then-block
-	bodyIndent := indent + 1
-	if isAlwaysTrue {
-		bodyIndent = indent // Don't add extra indent for unwrapped blocks
-	}
-	thenBody := cfa.ProcessRange(i+2, thenEnd, bodyIndent)
-	output = append(output, thenBody...)
-
-	if !isAlwaysTrue {
-		output = append(output, indentStr+"}")
-	}
-
-	// Check for else block
-	nextI := thenEnd
-	if isWhileLoop {
-		nextI++ // Skip the backward JUMP
-	}
-
-	return output, nextI
+	return 0, false
 }
 
 // cleanParentheses removes redundant outer parentheses

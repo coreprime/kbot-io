@@ -64,14 +64,14 @@ Create()
 }
 
 func TestCompileTAKMathIntrinsicEmitsOpcode(t *testing.T) {
-	// `__tak_math_09(<expr>)` should emit the inner expression's opcodes
-	// followed by TAK_MATH_09 (stack-neutral), then the POP_LOCAL.
+	// `__tak_math_09(a, b)` pushes both operands, then TAK_MATH_09 pops
+	// them and pushes the result for the POP_LOCAL.
 	src := `.version 6
 
 Create()
 {
 	var x;
-	x = __tak_math_09(3 * 2);
+	x = __tak_math_09(3, 4 * 2);
 	return;
 }
 `

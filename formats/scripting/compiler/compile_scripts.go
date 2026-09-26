@@ -20,17 +20,9 @@ func (c *Compiler) compileStartScript(line string) error {
 		return fmt.Errorf("unknown script: %s", scriptName)
 	}
 
-	// Parse and push parameters
-	paramCount := 0
-	if paramsStr != "" {
-		params := splitParams(paramsStr)
-		for _, p := range params {
-			p = strings.TrimSpace(p)
-			if p != "" {
-				c.compileExpression(p)
-				paramCount++
-			}
-		}
+	paramCount, err := c.compileArguments(paramsStr)
+	if err != nil {
+		return err
 	}
 
 	// Emit START_SCRIPT with script# and param_count
@@ -52,17 +44,9 @@ func (c *Compiler) compileCallScript(line string) error {
 		return fmt.Errorf("unknown script: %s", scriptName)
 	}
 
-	// Parse and push parameters
-	paramCount := 0
-	if paramsStr != "" {
-		params := splitParams(paramsStr)
-		for _, p := range params {
-			p = strings.TrimSpace(p)
-			if p != "" {
-				c.compileExpression(p)
-				paramCount++
-			}
-		}
+	paramCount, err := c.compileArguments(paramsStr)
+	if err != nil {
+		return err
 	}
 
 	// Emit CALL_SCRIPT with script# and param_count
@@ -70,7 +54,22 @@ func (c *Compiler) compileCallScript(line string) error {
 	return nil
 }
 
-// compileWaitForTurn compiles wait-for-turn statement: wait-for-turn piece around axis;
+// compileArguments compiles a call's comma-separated argument list and
+// returns the number of arguments.
+func (c *Compiler) compileArguments(paramsStr string) (int, error) {
+	count := 0
+	for _, p := range splitParams(paramsStr) {
+		if p == "" {
+			return count, fmt.Errorf("empty argument in (%s)", paramsStr)
+		}
+		if err := c.compileExpression(p); err != nil {
+			return count, err
+		}
+		count++
+	}
+	return count, nil
+}
+
 // compileAttachUnit compiles: attach-unit <uid> to <piece> <flag>;
 func (c *Compiler) compileAttachUnit(line string) error {
 	line = strings.TrimSuffix(strings.TrimSpace(line), ";")
@@ -89,9 +88,11 @@ func (c *Compiler) compileAttachUnit(line string) error {
 	piece := strings.TrimSpace(rest[:lastSpace])
 	flag := strings.TrimSpace(rest[lastSpace+1:])
 
-	c.compileExpression(uid)
-	c.compileExpression(piece)
-	c.compileExpression(flag)
+	for _, operand := range []string{uid, piece, flag} {
+		if err := c.compileExpression(operand); err != nil {
+			return err
+		}
+	}
 	c.emit(scripting.OP_ATTACH_UNIT, 0)
 	return nil
 }
@@ -100,7 +101,9 @@ func (c *Compiler) compileAttachUnit(line string) error {
 func (c *Compiler) compileDropUnit(line string) error {
 	line = strings.TrimSuffix(strings.TrimSpace(line), ";")
 	expr := strings.TrimPrefix(line, "drop-unit ")
-	c.compileExpression(expr)
+	if err := c.compileExpression(expr); err != nil {
+		return err
+	}
 	c.emit(scripting.OP_DROP_UNIT, 0)
 	return nil
 }

@@ -1,7 +1,15 @@
 // Package linter provides static analysis rules for COB/BOS scripts.
+//
+// Besides style rules, the default set checks every COB that is not a TA:
+// Kingdoms (version 6) file against what TA 3.1c executes (TACompatRules):
+// TA: Kingdoms instructions, words the game does not run, PUSH/POP flag
+// values it faults on, GET with fewer than five pending values, other stack
+// underflows and more than the game's 32 stack slots. It also reports
+// duplicate function names and the damage the COB reader tolerated.
 package linter
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -63,6 +71,13 @@ type ScriptInfo struct {
 	CalledScripts        []scriptCall
 	UsedPieces           map[int]bool
 	UsedStatics          map[int]bool
+	// Stack is the stack-slot analysis of the instructions (see
+	// scripting.AnalyzeStack), with TA: Kingdoms instructions treated as runnable
+	// only in version-6 files.
+	Stack scripting.StackReport
+	// DisassembleErr is set when the script's code is truncated;
+	// Instructions then holds the instructions before the damage.
+	DisassembleErr error
 }
 
 type scriptCall struct {
@@ -132,28 +147,43 @@ type Linter struct {
 	rules []Rule
 }
 
-// New creates a Linter with the default rule set.
+// New creates a Linter with the default rule set: the style rules below,
+// DuplicateFunctionRule, MalformedCOBRule and the TA compatibility rules
+// (TACompatRules), which only report on COBs that are not TA: Kingdoms
+// version-6 files.
 func New() *Linter {
-	return &Linter{
-		rules: []Rule{
-			&UnusedPieceRule{},
-			&UnusedStaticRule{},
-			&AlwaysTrueRule{},
-			&DeadCodeRule{},
-			&LongFunctionRule{MaxLines: 100},
-			&CyclomaticComplexityRule{MaxComplexity: 15},
-			&UnusedLocalRule{},
-			&InvalidCallRule{},
-			&SpeedZeroRule{},
-			&EmptyFunctionRule{},
-			&DuplicateAnimationRule{},
-			&SleepOnlyGuardRule{},
-			&DuplicateIfRule{},
-			&RawSignalRule{},
-			&UnnamedGlobalRule{},
-			&SignalNeverSignalledRule{},
-			&RecursiveCallRule{},
-		},
+	return NewWithRules(DefaultRules()...)
+}
+
+// NewWithRules creates a Linter that runs exactly the given rules.
+func NewWithRules(rules ...Rule) *Linter {
+	return &Linter{rules: rules}
+}
+
+// DefaultRules returns the rule set New uses.
+func DefaultRules() []Rule {
+	return append(styleRules(), append([]Rule{&DuplicateFunctionRule{}, &MalformedCOBRule{}}, TACompatRules()...)...)
+}
+
+func styleRules() []Rule {
+	return []Rule{
+		&UnusedPieceRule{},
+		&UnusedStaticRule{},
+		&AlwaysTrueRule{},
+		&DeadCodeRule{},
+		&LongFunctionRule{MaxLines: 100},
+		&CyclomaticComplexityRule{MaxComplexity: 15},
+		&UnusedLocalRule{},
+		&InvalidCallRule{},
+		&SpeedZeroRule{},
+		&EmptyFunctionRule{},
+		&DuplicateAnimationRule{},
+		&SleepOnlyGuardRule{},
+		&DuplicateIfRule{},
+		&RawSignalRule{},
+		&UnnamedGlobalRule{},
+		&SignalNeverSignalledRule{},
+		&RecursiveCallRule{},
 	}
 }
 
@@ -223,17 +253,19 @@ func analyze(cob *scripting.COB) *FileInfo {
 		}
 
 		instructions, err := cob.Disassemble(i)
-		if err != nil {
+		if err != nil && !errors.Is(err, scripting.ErrTruncatedInstruction) {
 			continue
 		}
 
 		si := ScriptInfo{
-			Name:         name,
-			Index:        i,
-			Instructions: instructions,
-			UsedLocals:   make(map[int]bool),
-			UsedPieces:   make(map[int]bool),
-			UsedStatics:  make(map[int]bool),
+			Name:           name,
+			Index:          i,
+			Instructions:   instructions,
+			UsedLocals:     make(map[int]bool),
+			UsedPieces:     make(map[int]bool),
+			UsedStatics:    make(map[int]bool),
+			Stack:          scripting.AnalyzeStack(instructions, cob.VersionSignature == kingdomsVersion),
+			DisassembleErr: err,
 		}
 
 		analyzeScript(&si, cob)
@@ -518,7 +550,8 @@ func analyzeScript(si *ScriptInfo, cob *scripting.COB) {
 			scripting.OP_MOVE_NOW, scripting.OP_TURN_NOW,
 			scripting.OP_WAIT_FOR_TURN, scripting.OP_WAIT_FOR_MOVE,
 			scripting.OP_SHOW, scripting.OP_HIDE,
-			scripting.OP_CACHE, scripting.OP_DONT_CACHE, scripting.OP_DONT_SHADE:
+			scripting.OP_CACHE, scripting.OP_DONT_CACHE, scripting.OP_SHADE, scripting.OP_DONT_SHADE,
+			scripting.OP_DONT_SHADOW, scripting.OP_EMIT_SFX, scripting.OP_PIECE_OP_09:
 			si.UsedPieces[int(inst.Operand)] = true
 
 		case scripting.OP_EXPLODE:

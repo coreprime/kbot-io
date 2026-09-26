@@ -66,7 +66,9 @@ func (c *Compiler) compileWaitForMove(line string) error {
 func (c *Compiler) compileSleep(line string) error {
 	line = strings.TrimSuffix(strings.TrimSpace(line), ";")
 	expr := strings.TrimSpace(strings.TrimPrefix(line, "sleep"))
-	c.compileExpression(expr)
+	if err := c.compileExpression(expr); err != nil {
+		return err
+	}
 	c.emit(scripting.OP_SLEEP, 0)
 	return nil
 }

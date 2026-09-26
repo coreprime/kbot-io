@@ -178,3 +178,50 @@ func TestPreprocessorRealFile(t *testing.T) {
 		t.Errorf("Expected Create() function")
 	}
 }
+
+func TestPreprocessorDropsCommentsFromDirectives(t *testing.T) {
+	p := NewPreprocessor(filesystem.NewMemoryFileSystem())
+	input := `#define BUILD_PERCENT_LEFT 17 // get 0 = unit is built
+#define SIG_AIM 2 /* aim */
+while(get BUILD_PERCENT_LEFT)
+signal SIG_AIM;`
+	result, err := p.ProcessContent(input, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "while(get 17)") || !strings.Contains(result, "signal 2;") {
+		t.Errorf("got:\n%s", result)
+	}
+}
+
+func TestPreprocessorExpandsNestedDefines(t *testing.T) {
+	// The outer define must be fully expanded whatever order the defines
+	// are visited in.
+	input := `#define SFXTYPE_POINTBASED 256
+#define SFXTYPE_WHITESMOKE (SFXTYPE_POINTBASED | 1)
+#define SMOKE SFXTYPE_WHITESMOKE
+#define DOLLAR $1
+emit-sfx SMOKE from base;
+x = DOLLAR;`
+	for i := 0; i < 20; i++ {
+		p := NewPreprocessor(filesystem.NewMemoryFileSystem())
+		result, err := p.ProcessContent(input, ".")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(result, "emit-sfx (256 | 1) from base;") || !strings.Contains(result, "x = $1;") {
+			t.Fatalf("got:\n%s", result)
+		}
+	}
+}
+
+func TestPreprocessorStopsSelfReferencingDefines(t *testing.T) {
+	p := NewPreprocessor(filesystem.NewMemoryFileSystem())
+	result, err := p.ProcessContent("#define LOOP (LOOP + 1)\nx = LOOP;", ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "LOOP") {
+		t.Errorf("got:\n%s", result)
+	}
+}
