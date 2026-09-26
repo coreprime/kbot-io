@@ -186,8 +186,9 @@ func CheckSides(sides []Side) []common.Warning {
 }
 
 // Check reports what the game does not read, or refuses, in the document: the
-// sides (see CheckSides), a second [CANBUILD] section and builder lists with
-// gaps or more entries than the game keeps.
+// sides (see CheckSides), a second [CANBUILD] section, builder lists with gaps
+// or more entries than the game keeps, and canbuildN values longer than
+// CanBuildNameMax characters.
 func (d *SideData) Check() []common.Warning {
 	out := CheckSides(d.Sides)
 	for _, s := range d.Sections {
@@ -207,9 +208,19 @@ func (d *SideData) Check() []common.Warning {
 		seen[folded] = true
 		length := b.listLength()
 		for _, key := range sortedKeys(b.Entries) {
-			if n, ok := canBuildIndex(key); ok && n > length {
+			n, ok := canBuildIndex(key)
+			if !ok {
+				continue
+			}
+			if n > length {
 				out = append(out, common.Warning{Section: section, Key: key, Message: fmt.Sprintf(
 					"after a gap in the numbering (no canbuild%d); the game stops at the gap", length+1)})
+				continue
+			}
+			if v, _ := values.Lookup(b.Entries, key); len(v) > CanBuildNameMax {
+				out = append(out, common.Warning{Section: section, Key: key, Message: fmt.Sprintf(
+					"%d characters; the game keeps the first %d (%q), which may name no unit",
+					len(v), CanBuildNameMax, values.Truncate(v, CanBuildNameMax))})
 			}
 		}
 		if total := length; total > CanBuildLimit {

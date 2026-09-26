@@ -143,3 +143,42 @@ func TestSoundsStopAtTheFirstGap(t *testing.T) {
 		t.Errorf("nested section lost: %s", msg)
 	}
 }
+
+func TestSideDataCheckReportsLongCanBuildNames(t *testing.T) {
+	long := strings.Repeat("A", CanBuildNameMax+1)
+	var sd SideData
+	src := "[CANBUILD]{[ARMCOM]{canbuild1=ARMSOLAR;canbuild2=" + long + ";canbuild4=" + long + ";}}"
+	if err := tdf.Unmarshal([]byte(src), &sd); err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, w := range sd.Check() {
+		keys = append(keys, w.Key)
+		if w.Key == "canbuild2" && !strings.Contains(w.Message, "32 characters") {
+			t.Errorf("message: %s", w.Message)
+		}
+	}
+	// canbuild4 sits after the gap, which is its warning.
+	if strings.Join(keys, ",") != "canbuild2,canbuild4" {
+		t.Errorf("warnings for %v", keys)
+	}
+}
+
+func TestSoundCheckReportsLongText(t *testing.T) {
+	long := strings.Repeat("s", SoundTextMax+1)
+	var classes []SoundClass
+	src := "[" + strings.Repeat("C", SoundTextMax+1) + "]{select1=" + long + ";select1text=" + long +
+		";ok=fine;ok1text=" + long + ";unknownevent=" + long + ";select3=" + long + ";}\n[SHORT]{ok=fine;}"
+	if err := tdf.Unmarshal([]byte(src), &classes); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, w := range CheckSounds(classes) {
+		got = append(got, w.Key)
+	}
+	// The name, then the keys Sounds reads; ok1text belongs to no ok1 key,
+	// and unknownevent and select3 (after the select2 gap) are never read.
+	if strings.Join(got, ",") != ",select1,select1text" {
+		t.Errorf("warnings for keys %q", got)
+	}
+}
