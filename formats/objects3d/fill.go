@@ -247,16 +247,16 @@ func capLoop(o *Object, loop []int, owner int, objCentroid vec3, opts FillOption
 			return 0, 0
 		}
 	}
-	color := o.Primitives[owner].ColorIndex
-	texture := o.Primitives[owner].TextureName
-	colored := o.Primitives[owner].IsColored
+	src := o.Primitives[owner]
 	addTri := func(a, b, c int) {
 		o.Primitives = append(o.Primitives, Primitive{
-			ColorIndex:    color,
+			ColorIndex:    src.ColorIndex,
 			VertexIndices: []int{a, b, c},
-			TextureName:   texture,
-			IsColored:     colored,
+			TextureName:   src.TextureName,
+			IsColored:     src.IsColored,
 			Synthetic:     true,
+			RawColorIndex: src.RawColorIndex,
+			RawIsColored:  src.RawIsColored,
 		})
 	}
 	return capRec(o, loop, objCentroid, opts, addTri, 0)

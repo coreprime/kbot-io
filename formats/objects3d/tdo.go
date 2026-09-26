@@ -33,6 +33,10 @@ const (
 	decodeBudgetSlack  = 1 << 20
 )
 
+// ColoredFlag is the bit of a primitive's stored is_colored word that makes
+// the game fill the primitive with its colour index instead of texturing it.
+const ColoredFlag = 0x1
+
 // ErrMalformed is wrapped by every error LoadFromBytes and LoadFromReader
 // return for a file that is truncated or structurally damaged. Errors for data
 // that runs past the end of the file also wrap io.ErrUnexpectedEOF.
@@ -45,6 +49,9 @@ type Vertex struct {
 
 // Primitive is one face, line or point of an object.
 type Primitive struct {
+	// ColorIndex is the palette index a coloured primitive is filled with.
+	// The game uses only the low byte of the stored colour word, so a loaded
+	// primitive has ColorIndex == RawColorIndex & 0xff.
 	ColorIndex int
 	// VertexIndices index the owning object's Vertices, in the stored corner
 	// order. They are kept as stored even when one is past the end of
@@ -54,11 +61,20 @@ type Primitive struct {
 	// TextureName is the stored texture name, or "" for none. The game looks
 	// texture names up case-insensitively.
 	TextureName string
-	IsColored   bool
+	// IsColored is bit 0 (ColoredFlag) of the stored is_colored word: the game
+	// fills the primitive with ColorIndex instead of texturing it.
+	IsColored bool
 	// Synthetic marks primitives that were not present in the source file
 	// but were generated to close gaps left by deleted faces. It is never
 	// set by the loader; only FillModel produces synthetic primitives.
 	Synthetic bool
+	// RawColorIndex is the colour word exactly as stored in the file.
+	RawColorIndex int32
+	// RawIsColored is the is_colored flag word exactly as stored in the
+	// file. The game keeps the whole word as the primitive's flags and sets
+	// its own animated (0x2) and team-texture (0x4) bits from the texture it
+	// binds; only bit 0 changes how a primitive is drawn.
+	RawIsColored int32
 }
 
 // Object is a node (piece) in the 3DO hierarchy.
@@ -117,14 +133,20 @@ func (m *Model) TotalPrimitives() int {
 	return n
 }
 
-// Textures returns the unique texture names used across all objects.
+// Textures returns the unique texture names used across all objects, in
+// first-use order. Names are compared case-insensitively (ASCII), as the game
+// looks them up; each name is reported with the spelling of its first use.
 func (m *Model) Textures() []string {
 	seen := make(map[string]bool)
 	var textures []string
 	for _, o := range m.AllObjects {
 		for _, p := range o.Primitives {
-			if p.TextureName != "" && !seen[p.TextureName] {
-				seen[p.TextureName] = true
+			if p.TextureName == "" {
+				continue
+			}
+			key := foldName(p.TextureName)
+			if !seen[key] {
+				seen[key] = true
 				textures = append(textures, p.TextureName)
 			}
 		}
@@ -139,6 +161,17 @@ func (m *Model) TopLevel() []*Object {
 		return nil
 	}
 	return append([]*Object{m.Root}, m.RootSiblings...)
+}
+
+// foldName lower-cases ASCII letters only, matching the game's name lookups.
+func foldName(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
 }
 
 // LoadFromReader parses a 3DO file. The model is read from offset 0 of r to
@@ -291,8 +324,10 @@ func (l *loader) primitive(off int64, p *Primitive) error {
 	textureAt := int64(l.word(off + 16))
 	flags := l.word(off + 28)
 	*p = Primitive{
-		ColorIndex: int(colour),
-		IsColored:  flags != 0,
+		ColorIndex:    int(uint8(colour)),
+		IsColored:     flags&ColoredFlag != 0,
+		RawColorIndex: colour,
+		RawIsColored:  flags,
 	}
 	if textureAt != 0 {
 		name, err := l.str(textureAt)

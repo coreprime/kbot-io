@@ -288,6 +288,40 @@ func TestLoadAliasBudget(t *testing.T) {
 	wantMalformed(t, build(64, 256*1024), "overlapping arrays")
 }
 
+// is_colored is a flag word whose bit 0 means coloured; the colour index is
+// the low byte of the stored word. Both raw words are kept.
+func TestLoadColourWords(t *testing.T) {
+	quad := []uint16{0, 1, 2, 3}
+	data := encodeTree(&tObj{
+		verts: []Vertex{{}, {}, {}, {}},
+		prims: []tPrim{
+			{colour: 0x111, isColored: 1, idx: quad},
+			{colour: 5, isColored: 2, idx: quad},
+			{colour: -1, isColored: 3, idx: quad},
+			{colour: 7, isColored: 0, idx: quad},
+		},
+	})
+	m := mustLoad(t, data)
+	want := []struct {
+		colour  int
+		colored bool
+		rawC    int32
+		rawF    int32
+	}{
+		{0x11, true, 0x111, 1},
+		{5, false, 5, 2},
+		{0xff, true, -1, 3},
+		{7, false, 7, 0},
+	}
+	for i, w := range want {
+		p := m.Root.Primitives[i]
+		if p.ColorIndex != w.colour || p.IsColored != w.colored || p.RawColorIndex != w.rawC || p.RawIsColored != w.rawF {
+			t.Errorf("primitive %d = {ColorIndex %#x IsColored %v Raw %#x/%#x}, want %+v",
+				i, p.ColorIndex, p.IsColored, p.RawColorIndex, p.RawIsColored, w)
+		}
+	}
+}
+
 // The version word is kept and not checked.
 func TestLoadVersionSignature(t *testing.T) {
 	for _, v := range []int32{0, 1, 7} {
@@ -309,6 +343,30 @@ func TestLoadOutOfRangeIndexKept(t *testing.T) {
 	m := mustLoad(t, data)
 	if got := m.Root.Primitives[0].VertexIndices; !reflect.DeepEqual(got, []int{0, 1, 3}) {
 		t.Errorf("indices = %v", got)
+	}
+}
+
+// Textures() folds case like the game's texture lookup.
+func TestTexturesCaseInsensitive(t *testing.T) {
+	tri := []uint16{0, 1, 2}
+	data := encodeTree(&tObj{
+		verts: []Vertex{{}, {}, {}},
+		prims: []tPrim{
+			{idx: tri, texture: "ArmTex"},
+			{idx: tri, texture: "armtex"},
+			{idx: tri, texture: "Other"},
+			{idx: tri, texture: "ARMTEX"},
+		},
+	}, &tObj{
+		verts: []Vertex{{}, {}, {}},
+		prims: []tPrim{{idx: tri, texture: "sibtex"}},
+	})
+	m := mustLoad(t, data)
+	if got, want := m.Textures(), []string{"ArmTex", "Other", "sibtex"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Textures = %v, want %v", got, want)
+	}
+	if m.TotalPrimitives() != 5 || m.TotalVertices() != 6 {
+		t.Errorf("totals = %d prims, %d verts; root siblings must count", m.TotalPrimitives(), m.TotalVertices())
 	}
 }
 
