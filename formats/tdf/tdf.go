@@ -24,6 +24,13 @@ type Document struct {
 	root  *Section
 	diags []Diagnostic
 	src   []byte // source text for Bytes; nil for a NewDocument
+
+	// Source bookkeeping for Bytes: the offset of the unterminated "/*" the
+	// text ends in and the start of stray top-level text after the last
+	// statement (-1 for none), and whether SkipStrayText was set.
+	comment int64
+	tail    int64
+	skip    bool
 }
 
 // Section is a [name]{ ... } block of a Document, or the document's top level.
@@ -35,10 +42,12 @@ type Section struct {
 	// Source bookkeeping for Bytes. fromSrc is set for sections read by
 	// Parse; open is the offset just past its '{' (-1 when it had none, 0 for
 	// the top level); stop is where the top level stopped (the end of the
-	// text or a stray '}'); removed lists statements Delete took out.
+	// text or a stray '}'); cut is set when the text ended before its '}';
+	// removed lists statements Delete took out.
 	fromSrc bool
 	open    int64
 	stop    int64
+	cut     bool
 	removed []span
 }
 
@@ -68,6 +77,7 @@ type fieldSource struct {
 	stmts []span
 	value span
 	orig  string
+	cut   bool // the text ended before the last statement's ';'
 }
 
 // Key returns the field key, spelled as first written.
@@ -86,7 +96,7 @@ func newSection(name string) *Section {
 
 // NewDocument creates a new empty TDF document.
 func NewDocument() *Document {
-	return &Document{root: newSection("")}
+	return &Document{root: newSection(""), comment: -1, tail: -1}
 }
 
 // Parse reads TDF text from r the way the game does, repairing what the game
@@ -122,6 +132,7 @@ func ParseWith(r io.Reader, opts ParseOptions) (*Document, error) {
 	}
 	sortDiagnostics(doc.diags)
 	doc.src = data
+	doc.comment, doc.tail, doc.skip = p.comment, p.tail, opts.SkipStrayText
 	doc.root.fromSrc, doc.root.stop = true, p.stopOff
 	doc.root.fill(els)
 	return doc, nil
@@ -131,7 +142,7 @@ func (s *Section) fill(els []*element) {
 	for _, el := range els {
 		if el.section {
 			child := newSection(el.key)
-			child.fromSrc, child.open = true, el.vOff
+			child.fromSrc, child.open, child.cut = true, el.vOff, el.cut
 			child.fill(el.children)
 			s.items = append(s.items, item{section: child, end: el.end})
 			continue
@@ -144,6 +155,7 @@ func (s *Section) fill(els []*element) {
 		f.src.stmts = append(f.src.stmts, span{el.off, el.end})
 		f.src.value = span{el.vOff, el.vEnd}
 		f.src.orig = el.value
+		f.src.cut = el.cut
 	}
 }
 

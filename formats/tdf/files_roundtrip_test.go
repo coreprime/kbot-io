@@ -97,8 +97,9 @@ type metaSection struct {
 
 // TestDocumentAndMetaAllGameFiles checks, on every text file of the configured
 // game directories, that the Document tree and a Meta-bearing struct both
-// re-emit what the game reads (strict SemanticEqual), and that an unchanged
-// Document gives its source back byte for byte.
+// re-emit what the game reads (strict SemanticEqual), that an unchanged
+// Document gives its source back byte for byte, and that Bytes can edit it in
+// place.
 func TestDocumentAndMetaAllGameFiles(t *testing.T) {
 	for _, g := range []struct {
 		env      string
@@ -138,6 +139,17 @@ func TestDocumentAndMetaAllGameFiles(t *testing.T) {
 				if same, err := doc.Bytes(); err != nil || !bytes.Equal(same, data) {
 					fail(path, "unchanged Bytes differs from the source: %v", err)
 				}
+				// Edit every section in place. Bytes checks that the result
+				// reads back as the edited document; for a file the game
+				// accepts it must also manage to make every change.
+				edited, _ := Parse(bytes.NewReader(data))
+				editEverySection(edited.Root())
+				edited.AddSection("KBOTIO_ADDED").SetInt("x", 1)
+				if _, err := edited.Bytes(); err != nil {
+					if _, strictErr := ParseWith(bytes.NewReader(data), ParseOptions{Strict: true}); strictErr == nil {
+						fail(path, "in-place edit: %v", err)
+					}
+				}
 				var w bytes.Buffer
 				if err := doc.Write(&w); err != nil {
 					fail(path, "write: %v", err)
@@ -162,5 +174,22 @@ func TestDocumentAndMetaAllGameFiles(t *testing.T) {
 			}
 			t.Logf("%s: %d files checked, %d failed", g.env, total, failed)
 		})
+	}
+}
+
+// editEverySection changes the first field of s and of every section below it
+// (to a value ending in '/', which must not join a comment that follows),
+// deletes the second and adds a field.
+func editEverySection(s *Section) {
+	fields := s.Fields()
+	if len(fields) > 0 {
+		s.Set(fields[0].Key(), "edited/")
+	}
+	if len(fields) > 1 {
+		s.Delete(fields[1].Key())
+	}
+	s.SetInt("kbotio_added", 1)
+	for _, c := range s.Sections() {
+		editEverySection(c)
 	}
 }

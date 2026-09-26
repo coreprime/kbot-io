@@ -38,6 +38,10 @@ type element struct {
 	// vEnd is the offset of its closing '}' (-1 when there is none).
 	off, end   int64
 	vOff, vEnd int64
+
+	// cut is set when the text ended before the statement's ';' (a field) or
+	// '}' (a section with a body).
+	cut bool
 }
 
 const (
@@ -181,6 +185,8 @@ type parser struct {
 	path     []string
 	stopped  bool  // a stray '}' ended the text
 	stopOff  int64 // where reading stopped: a stray '}' or the end of the text
+	comment  int64 // offset of the unterminated "/*" the text ends in, or -1
+	tail     int64 // start of stray top-level text after the last statement, or -1
 	rootSecs map[string]bool
 	rootKeys map[string]bool
 }
@@ -199,12 +205,17 @@ func newParser(r io.Reader, opts ParseOptions) (*parser, error) {
 		onDiag:   opts.OnDiagnostic,
 		rootSecs: map[string]bool{},
 		rootKeys: map[string]bool{},
+		comment:  -1,
+		tail:     -1,
 	}
 	p.b = &blanker{
-		r:           br,
-		limit:       opts.maxBytes(),
-		onNUL:       func(off int64) { p.note(DiagEmbeddedNUL, off, "") },
-		onOpenBlock: func(off int64) { p.note(DiagUnterminatedComment, off, "") },
+		r:     br,
+		limit: opts.maxBytes(),
+		onNUL: func(off int64) { p.note(DiagEmbeddedNUL, off, "") },
+		onOpenBlock: func(off int64) {
+			p.comment = off
+			p.note(DiagUnterminatedComment, off, "")
+		},
 	}
 	head, err := br.Peek(3)
 	switch {
@@ -308,20 +319,26 @@ func (p *parser) next() (*element, error) {
 				return nil, err
 			}
 			p.noteDuplicate(p.rootSecs, el)
+			p.tail = -1
 			return el, nil
 		case '}':
 			p.note(DiagStrayBrace, p.at(), "")
 			p.stopped, p.stopOff = true, p.at()
 			return nil, nil
 		default:
+			start := p.at()
 			el, err := p.field()
 			if err != nil {
 				return nil, err
 			}
 			if el == nil {
+				if p.tail < 0 {
+					p.tail = start
+				}
 				continue
 			}
 			p.noteDuplicate(p.rootKeys, el)
+			p.tail = -1
 			return el, nil
 		}
 	}
@@ -415,7 +432,7 @@ func (p *parser) body(el *element, depth int) error {
 			if p.b.err != nil {
 				return p.b.err
 			}
-			el.end = p.at()
+			el.end, el.cut = p.at(), true
 			return p.reject(DiagUnexpectedEnd, p.at(), "")
 		}
 		switch c {
@@ -486,6 +503,7 @@ func (p *parser) field() (*element, error) {
 			if err := p.reject(DiagMissingSemicolon, start, el.key); err != nil {
 				return nil, err
 			}
+			el.cut = true
 			break
 		}
 		p.advance()
