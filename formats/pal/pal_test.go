@@ -134,8 +134,8 @@ func TestLoadLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadLookupFromFile: %v", err)
 	}
-	if len(table) != FileSize {
-		t.Errorf("lookup size = %d, want %d", len(table), FileSize)
+	if len(table) != AlphaTableSize {
+		t.Errorf("lookup size = %d, want %d", len(table), AlphaTableSize)
 	}
 
 	pal, _ := LoadFromBytes(palettes.DefaultPalette)
@@ -143,7 +143,7 @@ func TestLoadLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderLookupSwatch: %v", err)
 	}
-	if img.Bounds().Dx() != 512 || img.Bounds().Dy() != 8 {
-		t.Errorf("expected 512x8, got %dx%d", img.Bounds().Dx(), img.Bounds().Dy())
+	if img.Bounds().Dx() != 512 || img.Bounds().Dy() != 512 {
+		t.Errorf("expected 512x512, got %dx%d", img.Bounds().Dx(), img.Bounds().Dy())
 	}
 }

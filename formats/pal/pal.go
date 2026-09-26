@@ -1,13 +1,3 @@
-// Package pal implements reading and writing of Total Annihilation .PAL palette
-// files.
-//
-// A TA palette is a fixed 1024-byte blob: 256 entries of 4 bytes each, laid out
-// as R, G, B, A in little-endian order.  The alpha byte is unused by the game
-// (always 0 in Cavedog's files) and color index 0 acts as transparent.
-//
-// The same on-disk layout is also reused for the .ALP shadow-alpha, .LHT light
-// and .SHD shadow lookup tables — they are 1024-byte index→index mappings, not
-// RGB palettes, so this package treats them as raw byte tables when asked.
 package pal
 
 import (
@@ -180,57 +170,6 @@ func (p *Palette) WriteGPL(w io.Writer, name string) error {
 		}
 	}
 	return nil
-}
-
-// LoadLookupFromReader parses a 1024-byte color-index lookup table (.ALP, .LHT
-// or .SHD).  These files share the .PAL size but each byte is an index into
-// the main palette rather than a color channel.
-//
-// The returned slice has length FileSize and is the raw file bytes — readers
-// that need the table as a 256×4 grid (the canonical ALP/LHT layout) can index
-// directly.
-func LoadLookupFromReader(r io.Reader) ([]byte, error) {
-	buf := make([]byte, FileSize)
-	if _, err := io.ReadFull(r, buf); err != nil {
-		return nil, fmt.Errorf("read lookup table: %w", err)
-	}
-	return buf, nil
-}
-
-// LoadLookupFromFile is the file-path equivalent of LoadLookupFromReader.
-func LoadLookupFromFile(path string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	return LoadLookupFromReader(f)
-}
-
-// RenderLookupSwatch renders a 1024-byte color-index lookup table as a 256×4
-// grid of cellSize×cellSize squares using the given palette for the index→RGB
-// mapping.  Returns an RGBA image of size 256*cellSize × 4*cellSize.  Suitable
-// for .ALP/.LHT/.SHD which are all 256×4 index tables.
-func RenderLookupSwatch(table []byte, palette *Palette, cellSize int) (*image.RGBA, error) {
-	if len(table) != FileSize {
-		return nil, fmt.Errorf("lookup table must be %d bytes, got %d", FileSize, len(table))
-	}
-	if cellSize <= 0 {
-		cellSize = 4
-	}
-	img := image.NewRGBA(image.Rect(0, 0, 256*cellSize, 4*cellSize))
-	for row := 0; row < 4; row++ {
-		for col := 0; col < 256; col++ {
-			idx := table[row*256+col]
-			c := color.RGBA{palette.Colors[idx].R, palette.Colors[idx].G, palette.Colors[idx].B, 255}
-			for y := 0; y < cellSize; y++ {
-				for x := 0; x < cellSize; x++ {
-					img.SetRGBA(col*cellSize+x, row*cellSize+y, c)
-				}
-			}
-		}
-	}
-	return img, nil
 }
 
 // Histogram returns a summary of how many distinct RGB triples the palette
