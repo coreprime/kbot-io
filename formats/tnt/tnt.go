@@ -43,7 +43,7 @@ type Header struct {
 	PTRTileAnim uint32 // TA: feature structures. TA:K: terrain-name table (guW×guH uint32).
 	SeaLevel    uint32 // TA: sea level. TA:K: U-mapping table (guW×guH bytes).
 	PTRMinimap  uint32 // TA: minimap (252×252). TA:K: V-mapping table (guW×guH bytes).
-	Unknown1    uint32 // TA:K: minimap pointer (126×126 block at offset 0x2c).
+	Unknown1    uint32 // TA: minimap presence flags (see MinimapPresent). TA:K: minimap pointer (126×126 block).
 	Pad1        uint32
 	Pad2        uint32
 	Pad3        uint32 // 0x1020: minimap pointer.
@@ -249,10 +249,11 @@ func LoadFromReader(r io.ReadSeeker) (*Map, error) {
 		m.Tiles[i] = raw[i*TileGfxSize : (i+1)*TileGfxSize : (i+1)*TileGfxSize]
 	}
 
-	// Read minimap. A minimap that is out of range or truncated is dropped;
-	// it is only a preview, so the map itself still loads.
-	if ptr, _ := m.minimapWords(); ptr > 0 {
-		m.readMinimap(r, ptr, size)
+	// Read the minimap when the header flags one. A flagged minimap that is
+	// out of range or truncated is dropped; it is only a preview, so the map
+	// itself still loads.
+	if m.Header.MinimapFlags()&MinimapPresent != 0 {
+		m.readMinimap(r, m.minimapPtr(), size)
 	}
 
 	return m, nil
@@ -261,13 +262,27 @@ func LoadFromReader(r io.ReadSeeker) (*Map, error) {
 // IsLegacy reports whether the map was read from a 0x1020 file.
 func (m *Map) IsLegacy() bool { return m.Header.IDVersion == VersionLegacy }
 
-// minimapWords returns the header's minimap pointer and presence flags: the
-// words at 0x28/0x2c, or 0x38/0x3c for a 0x1020 map.
-func (m *Map) minimapWords() (ptr, flags uint32) {
-	if m.IsLegacy() {
-		return m.Header.Pad3, m.Header.Pad4
+// MinimapFlags returns the header word whose bit 0 (MinimapPresent) says
+// whether the file stores a minimap: the word at 0x2c (Unknown1), or 0x3c
+// (Pad4) in a 0x1020 file. TA: Kingdoms files keep their minimap pointer in
+// the 0x2c slot and have no presence flags, so the result is 0 for them.
+func (h *Header) MinimapFlags() uint32 {
+	switch h.IDVersion {
+	case VersionLegacy:
+		return h.Pad4
+	case VersionTAK:
+		return 0
 	}
-	return m.Header.PTRMinimap, m.Header.Unknown1
+	return h.Unknown1
+}
+
+// minimapPtr returns the header's minimap pointer: the word at 0x28, or 0x38
+// for a 0x1020 map.
+func (m *Map) minimapPtr() uint32 {
+	if m.IsLegacy() {
+		return m.Header.Pad3
+	}
+	return m.Header.PTRMinimap
 }
 
 // tileAttr converts a 0x1020 record to the 0x2000 attribute form.
@@ -290,10 +305,6 @@ func mulUint64(a, b uint64) (uint64, bool) {
 	hi, lo := bits.Mul64(a, b)
 	return lo, hi == 0
 }
-
-// maxMinimapSide is the largest minimap edge the reader accepts; a larger
-// stored minimap is dropped.
-const maxMinimapSide = 1024
 
 // section is one byte range of a TNT file named by a header pointer.
 type section struct {
@@ -342,39 +353,10 @@ func (m *Map) mapDataPadSection(tileMap, attrs section, others ...section) secti
 			return section{}
 		}
 	}
-	if ptr, _ := m.minimapWords(); ptr > 0 && (section{off: ptr, n: 8}).overlaps(start, end) {
+	if m.Header.MinimapFlags()&MinimapPresent != 0 && (section{off: m.minimapPtr(), n: 8}).overlaps(start, end) {
 		return section{}
 	}
 	return section{name: "mapdata padding", off: uint32(start), n: end - start}
-}
-
-// readMinimap reads the minimap stored at ptr, leaving m's minimap empty when
-// its header or pixels lie outside the file or a side is 0 or over 1024.
-func (m *Map) readMinimap(r io.ReadSeeker, ptr uint32, size int64) {
-	hdr := section{off: ptr, n: 8}
-	if hdr.check(size) != nil {
-		return
-	}
-	raw, err := readSection(r, hdr)
-	if err != nil {
-		return
-	}
-	mmW := binary.LittleEndian.Uint32(raw[0:4])
-	mmH := binary.LittleEndian.Uint32(raw[4:8])
-	if mmW == 0 || mmH == 0 || mmW > maxMinimapSide || mmH > maxMinimapSide {
-		return
-	}
-	pix := section{off: ptr + 8, n: uint64(mmW) * uint64(mmH)}
-	if uint64(ptr)+8 > uint64(^uint32(0)) || pix.check(size) != nil {
-		return
-	}
-	pixels, err := readSection(r, pix)
-	if err != nil {
-		return
-	}
-	m.Minimap = pixels
-	m.MinimapW = int(mmW)
-	m.MinimapH = int(mmH)
 }
 
 // streamSize returns the length of r and rewinds it to the start.
@@ -496,34 +478,6 @@ func (m *Map) RenderHeightMap() *image.Gray {
 		}
 	}
 	return img
-}
-
-// MinimapVoidByte is the palette index used for minimap padding (outside map area).
-const MinimapVoidByte = 0x64
-
-// MinimapContentBounds returns the actual content area within the minimap,
-// excluding the void padding (palette index 0x64) on the right and bottom.
-func (m *Map) MinimapContentBounds() (contentW, contentH int) {
-	if m.Minimap == nil {
-		return 0, 0
-	}
-	// Scan from right on first row.
-	contentW = 0
-	for x := m.MinimapW - 1; x >= 0; x-- {
-		if m.Minimap[x] != MinimapVoidByte {
-			contentW = x + 1
-			break
-		}
-	}
-	// Scan from bottom on first column.
-	contentH = 0
-	for y := m.MinimapH - 1; y >= 0; y-- {
-		if m.Minimap[y*m.MinimapW] != MinimapVoidByte {
-			contentH = y + 1
-			break
-		}
-	}
-	return contentW, contentH
 }
 
 // RenderMinimap renders the minimap as an RGBA image.

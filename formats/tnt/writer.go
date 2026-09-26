@@ -21,6 +21,12 @@ const TileAnimEntrySize = 132
 // the TileAnim feature table that ships with the TNT (the names referenced
 // by TileAttr.Feature indices).  Pass nil if there are no features.
 //
+// Save writes a minimap when MinimapW and MinimapH are both non-zero (each at
+// most 1024) and sets bit 0 of the 0x2c presence flags (MinimapPresent) to
+// match; without a minimap it writes an empty 0×0 minimap header and clears
+// the bit, and the game then builds the radar picture from the tiles.
+// BuildMinimap makes a minimap laid out as the game's own maps are.
+//
 // Save always writes version 0x2000. A map read from a 0x1020 file is
 // converted: each cell keeps its height and feature, and the legacy-only
 // bytes (LegacyAttr) are not written.
@@ -54,6 +60,13 @@ func (m *Map) Save(w io.Writer, features []Feature) error {
 			return fmt.Errorf("tile %d is %d bytes, expected %d", i, len(tile), TileGfxSize)
 		}
 	}
+	if m.MinimapW < 0 || m.MinimapH < 0 || m.MinimapW > maxMinimapSide || m.MinimapH > maxMinimapSide {
+		return fmt.Errorf("minimap %dx%d: each side must be at most %d", m.MinimapW, m.MinimapH, maxMinimapSide)
+	}
+	if m.MinimapW > 0 && m.MinimapH > 0 && len(m.Minimap) != m.MinimapW*m.MinimapH {
+		return fmt.Errorf("minimap data length %d does not match %dx%d=%d",
+			len(m.Minimap), m.MinimapW, m.MinimapH, m.MinimapW*m.MinimapH)
+	}
 
 	tiles := uint32(len(m.Tiles))
 	anims := uint32(len(features))
@@ -66,6 +79,14 @@ func (m *Map) Save(w io.Writer, features []Feature) error {
 		hdr.Unknown1, hdr.Pad3, hdr.Pad4 = 0, 0, 0
 	}
 	hdr.IDVersion = VersionTA
+	// The game reads the minimap only when bit 0 of the 0x2c word is set, so
+	// the bit follows whether a minimap is written; the other bits are kept.
+	writeMinimap := m.MinimapW > 0 && m.MinimapH > 0
+	if writeMinimap {
+		hdr.Unknown1 |= MinimapPresent
+	} else {
+		hdr.Unknown1 &^= MinimapPresent
+	}
 	hdr.Width = uint32(m.AttrW)
 	hdr.Height = uint32(m.AttrH)
 	hdr.Tiles = tiles
@@ -133,12 +154,7 @@ func (m *Map) Save(w io.Writer, features []Feature) error {
 	if err := binary.Write(w, binary.LittleEndian, mmH); err != nil {
 		return fmt.Errorf("write minimap height: %w", err)
 	}
-	if mmW > 0 && mmH > 0 {
-		expected := int(mmW) * int(mmH)
-		if len(m.Minimap) != expected {
-			return fmt.Errorf("minimap data length %d does not match %dx%d=%d",
-				len(m.Minimap), mmW, mmH, expected)
-		}
+	if writeMinimap {
 		if _, err := w.Write(m.Minimap); err != nil {
 			return fmt.Errorf("write minimap pixels: %w", err)
 		}

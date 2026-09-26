@@ -34,11 +34,13 @@ type Metadata struct {
 type HeaderMetadata struct {
 	IDVersion uint32 `json:"id_version"`
 	SeaLevel  uint32 `json:"sea_level"`
-	Unknown1  uint32 `json:"unknown1"`
-	Pad1      uint32 `json:"pad1"`
-	Pad2      uint32 `json:"pad2"`
-	Pad3      uint32 `json:"pad3"`
-	Pad4      uint32 `json:"pad4"`
+	// Unknown1 is the 0x2c word, the minimap presence flags. Save sets or
+	// clears its bit 0 (MinimapPresent) from whether minimap.png is packed.
+	Unknown1 uint32 `json:"unknown1"`
+	Pad1     uint32 `json:"pad1"`
+	Pad2     uint32 `json:"pad2"`
+	Pad3     uint32 `json:"pad3"`
+	Pad4     uint32 `json:"pad4"`
 }
 
 // MinimapMetadata records the minimap dimensions for round-trip.
