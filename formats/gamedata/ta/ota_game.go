@@ -368,7 +368,7 @@ func (s *Schema) Meteors(defaults *Meteor) MeteorSettings {
 		Duration: s.EffectiveMeteorDuration(),
 		Interval: s.EffectiveMeteorInterval(),
 	}
-	if own.Radius == 0 || float32(own.Density) == 0 || float32(own.Duration) == 0 || own.Interval == 0 {
+	if own.Radius == 0 || float32(own.Density) == 0 || float32(own.Duration) == 0 || float32(own.Interval) == 0 {
 		if defaults != nil {
 			fallback.Enabled = true
 			return fallback

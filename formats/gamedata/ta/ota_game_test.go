@@ -445,4 +445,10 @@ func TestMeteorsFallBackToTheDefaults(t *testing.T) {
 	if s := h.Schema(2).Meteors(d); s.Enabled {
 		t.Errorf("no weapon: %+v", s)
 	}
+	// The game reads the schema's values as single-precision floats, so an
+	// interval too small for one counts as 0.
+	tiny := readMap(t, "[GlobalHeader]{[Schema 0]{MeteorWeapon=ROCK;MeteorRadius=5;MeteorDensity=2;MeteorDuration=3;MeteorInterval=1e-50;}}")
+	if s := tiny.Header.Schema(0).Meteors(d); s.Weapon != "METEOR" {
+		t.Errorf("tiny interval: %+v", s)
+	}
 }
