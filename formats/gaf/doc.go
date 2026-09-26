@@ -61,4 +61,23 @@
 // Reading is bounded: a frame may hold at most 64 Mi pixels, one file may
 // decode to at most 512 MiB of pixel data in total and hold at most 2^20
 // frame headers, so a small crafted file cannot exhaust memory.
+//
+// # Writing
+//
+// WriteGAF and WriteGAFWith write back everything the reader keeps: the
+// sequence loop and +4 words, each frame's storage, +11 byte and unknown
+// words, and the layers of composite frames. Frames built in memory have
+// StorageDefault and are compressed unless WriteOptions.DefaultStorage says
+// otherwise. The game reads unit textures (textures/*.gaf) and the sight
+// masks (anims/vismasks.gaf) as plain pixel arrays, so frames written there
+// must be raw; StorageForPath returns the storage a path needs. A sequence
+// built in memory has LoopFlags 0 and plays once in the game; use SetLoops to
+// make it loop, as every stock sequence does.
+//
+// Each frame gets its own header, since the game cannot load a file whose
+// frame headers are shared. The writer refuses, without writing anything,
+// input the format cannot hold: more than 32767 sequences, 65535 frames in a
+// sequence or 255 layers in a frame, layers with layers of their own, names
+// over 32 bytes, durations over 65535 ticks, pixel buffers of the wrong size
+// and compressed rows over 65535 bytes.
 package gaf
