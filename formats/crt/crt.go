@@ -34,6 +34,15 @@ const argsPerClause = 5
 
 const argSize = 64
 
+// Minimum on-disk sizes of the variable-length records, used to reject counts
+// the rest of the file cannot hold before anything is allocated.
+const (
+	minPlayerSize = 4                         // rule count
+	minRuleSize   = 8                         // condition and action counts
+	clauseSize    = 4 + argsPerClause*argSize // opcode and argument slots
+	triggerSize   = stringField + 4*4         // name and bounds
+)
+
 // Unit is a single pre-placed unit or object.
 type Unit struct {
 	// Type is the unit/object definition name (e.g. "VERLIEGE", "NPCFARM").
@@ -131,6 +140,21 @@ func (r *reader) bytes(n int) ([]byte, error) {
 	return b, nil
 }
 
+// fits reports whether count records of at least size bytes each fit in the
+// rest of the file.
+func (r *reader) fits(count uint32, size int) bool {
+	return uint64(count)*uint64(size) <= uint64(len(r.data)-r.pos)
+}
+
+// checkCount returns an error when count records of at least size bytes each
+// cannot fit in the rest of the file.
+func (r *reader) checkCount(what string, count uint32, size int) error {
+	if !r.fits(count, size) {
+		return fmt.Errorf("%s count %d exceeds the %d bytes left in the file", what, count, len(r.data)-r.pos)
+	}
+	return nil
+}
+
 func indexNUL(b []byte) int {
 	for i, c := range b {
 		if c == 0 {
@@ -163,8 +187,8 @@ func Load(data []byte) (*File, error) {
 	}
 	// Guard against the single hand-edited outlier whose header is shifted: a
 	// plausible scenario never approaches this many records.
-	if need := int64(unitCount) * unitRecordSize; need < 0 || r.pos+int(need) > len(data) {
-		return nil, fmt.Errorf("unit count %d exceeds file bounds (%d bytes)", unitCount, len(data))
+	if err := r.checkCount("unit", unitCount, unitRecordSize); err != nil {
+		return nil, err
 	}
 
 	f.Units = make([]Unit, 0, unitCount)
@@ -213,6 +237,9 @@ func readPlayers(r *reader, f *File) error {
 	if err != nil {
 		return fmt.Errorf("read player count: %w", err)
 	}
+	if err := r.checkCount("player", count, minPlayerSize); err != nil {
+		return err
+	}
 	f.Players = make([]Player, 0, count)
 	for i := uint32(0); i < count; i++ {
 		p, err := readPlayer(r)
@@ -228,6 +255,9 @@ func readPlayer(r *reader) (Player, error) {
 	var p Player
 	ruleCount, err := r.u32()
 	if err != nil {
+		return p, err
+	}
+	if err := r.checkCount("rule", ruleCount, minRuleSize); err != nil {
 		return p, err
 	}
 	p.Rules = make([]Rule, 0, ruleCount)
@@ -261,6 +291,9 @@ func readClauses(r *reader) ([]Clause, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := r.checkCount("clause", count, clauseSize); err != nil {
+		return nil, err
+	}
 	clauses := make([]Clause, 0, count)
 	for i := uint32(0); i < count; i++ {
 		var c Clause
@@ -283,6 +316,9 @@ func readTriggers(r *reader, f *File) error {
 	count, err := r.u32()
 	if err != nil {
 		return fmt.Errorf("read trigger count: %w", err)
+	}
+	if err := r.checkCount("trigger", count, triggerSize); err != nil {
+		return err
 	}
 	f.Triggers = make([]Trigger, 0, count)
 	for i := uint32(0); i < count; i++ {
