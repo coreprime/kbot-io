@@ -1,74 +1,108 @@
 package gaf
 
-// TransparencyMode selects how a frame's transparency index is resolved at
-// render time. The zero value is TransparencyModeAuto, which preserves the
-// historical behavior callers got from Frame.TransparencyIndex.
+// TransparencyMode selects which pixels of a frame render as transparent.
+// The zero value, TransparencyModeAuto, applies the game's rule.
 type TransparencyMode int
 
 const (
-	// TransparencyModeAuto uses EffectiveTransparencyIndex (corner-detect
-	// heuristic for TAK uncompressed frames, metadata otherwise).
+	// TransparencyModeAuto applies the game's rule, the same as
+	// TransparencyModeMetadata. It is the zero value, so a zero
+	// RenderOptions and the convenience methods (ToImage, ToGIF, ToPNG,
+	// ToAPNG) render frames as the game draws them. Earlier versions guessed
+	// a key from the pixel data here; that guess is now
+	// TransparencyModeHeuristic.
 	TransparencyModeAuto TransparencyMode = iota
-	// TransparencyModeMetadata forces use of Frame.TransparencyIndex
-	// exactly as stored on disk, bypassing the heuristic.
+	// TransparencyModeMetadata applies the game's rule: a raw frame's pixels
+	// equal to its stored TransparencyIndex are transparent, and a
+	// compressed frame's skipped pixels are (see Frame.PixelOpaque).
+	// Palette index 0 is opaque black like any other colour.
 	TransparencyModeMetadata
 	// TransparencyModeNone disables transparency for the render — every
-	// palette entry stays opaque.
+	// pixel of the frame is opaque.
 	TransparencyModeNone
-	// TransparencyModeIndex uses a caller-supplied palette index.
+	// TransparencyModeIndex makes every pixel equal to RenderOptions.Index
+	// transparent, ignoring the frame's own key and coverage.
 	TransparencyModeIndex
+	// TransparencyModeHeuristic suits TA: Kingdoms raw texture atlases,
+	// whose stored TransparencyIndex often differs from the colour the
+	// artist filled the background with. For raw frames it uses
+	// EffectiveTransparencyIndex, which may pick a uniform corner colour;
+	// compressed and composite frames use the game's rule, since their
+	// skipped pixels are authoritative. VariantTAK.DefaultRenderOptions
+	// selects it. The game itself never guesses.
+	TransparencyModeHeuristic
 )
 
 // RenderOptions controls per-render transparency choices. A zero-valued
-// RenderOptions resolves to TransparencyModeAuto.
+// RenderOptions applies the game's rule (TransparencyModeAuto).
 type RenderOptions struct {
 	Mode  TransparencyMode
 	Index uint8 // honored when Mode == TransparencyModeIndex
 }
 
-// resolveTransparency returns the palette index to make transparent and
-// whether transparency should be applied at all.
-func (f *Frame) resolveTransparency(opts RenderOptions) (uint8, bool) {
-	switch opts.Mode {
-	case TransparencyModeMetadata:
-		return f.TransparencyIndex, true
-	case TransparencyModeNone:
-		return 0, false
-	case TransparencyModeIndex:
-		return opts.Index, true
-	default:
-		return f.EffectiveTransparencyIndex(), true
-	}
+// keyRule is the resolved transparency rule for one frame and render.
+type keyRule struct {
+	apply     bool  // any pixel may be transparent
+	index     uint8 // transparent value when coverage is not used
+	useOpaque bool  // honour Frame.Opaque (the game's rule)
 }
 
-// EffectiveTransparencyIndex returns the palette index that should be treated
-// as transparent when this frame is rendered.
+// keyRule resolves opts for this frame.
+func (f *Frame) keyRule(opts RenderOptions) keyRule {
+	switch opts.Mode {
+	case TransparencyModeNone:
+		return keyRule{}
+	case TransparencyModeIndex:
+		return keyRule{apply: true, index: opts.Index}
+	case TransparencyModeHeuristic:
+		if f.Storage != StorageCompressed && f.Opaque == nil && len(f.Layers) == 0 {
+			return keyRule{apply: true, index: f.EffectiveTransparencyIndex()}
+		}
+	}
+	return keyRule{apply: true, index: f.TransparencyIndex, useOpaque: true}
+}
+
+// transparentAt reports whether pixel i renders transparent under rule. An
+// index outside Pixels (a short, corrupt buffer) is transparent.
+func (f *Frame) transparentAt(i int, rule keyRule) bool {
+	if i >= len(f.Pixels) {
+		return true
+	}
+	if !rule.apply {
+		return false
+	}
+	if rule.useOpaque {
+		return !f.PixelOpaque(i)
+	}
+	return f.Pixels[i] == rule.index
+}
+
+// EffectiveTransparencyIndex returns the key TransparencyModeHeuristic uses
+// for this frame. It never changes TransparencyIndex, so writers still see
+// the stored byte.
 //
-// Most TA assets store an honest TransparencyIndex in the frame header — the
-// artist used that exact palette index for transparent pixels and the
-// renderer simply makes palette[TI] transparent. TA: Kingdoms texture-atlas
-// GAFs frequently carry a TransparencyIndex that doesn't match the actual
-// pixel value the artist used as the transparent fill (e.g. metadata claims
-// 9, the on-disk pixels are 5). In that case TA-style rendering shows the
-// background as an opaque dark teal rather than transparent.
-//
-// The heuristic:
+// For raw frames built by TA: Kingdoms artists the stored key often differs
+// from the pixel value used as the transparent fill (for example the key is
+// 9 but the background pixels are 5). The heuristic:
 //
 //  1. If TransparencyIndex appears anywhere in the pixel data, trust it.
-//     This is the common case — the decompressor's "transparent run" opcode
-//     fills with TI, and TA assets where TI is correctly authored also have
-//     TI-valued pixels in the data.
-//
-//  2. Otherwise sample the four corners; if they all agree on a value, use
-//     that. This rescues TAK uncompressed frames where TI is bogus but the
-//     artist painted a uniform border (the canonical "background" pixels).
-//
+//  2. Otherwise, if the four corner pixels agree, use their value (the
+//     artist's uniform border).
 //  3. Otherwise fall back to TransparencyIndex.
 //
-// The on-disk TransparencyIndex value is never overwritten — round-trip
-// writers still see the original byte.
+// Compressed and composite frames, whose skipped pixels say exactly what is
+// transparent, and frames with no pixels always return TransparencyIndex. A
+// nil frame returns 0.
+//
+// The game never does this: it always uses the stored key for raw frames. A
+// fully opaque TA frame with a uniform border would lose that border under
+// the heuristic, so TA renders should use TransparencyModeMetadata (the
+// default).
 func (f *Frame) EffectiveTransparencyIndex() uint8 {
-	if f == nil || len(f.Pixels) == 0 || f.Width == 0 || f.Height == 0 {
+	if f == nil {
+		return 0
+	}
+	if f.Storage == StorageCompressed || len(f.Layers) > 0 || len(f.Pixels) == 0 || f.Width == 0 || f.Height == 0 {
 		return f.TransparencyIndex
 	}
 	// Cheap scan: if metadata TI is present in the pixel data, prefer it.

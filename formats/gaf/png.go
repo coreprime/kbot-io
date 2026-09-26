@@ -6,313 +6,186 @@ import (
 	"fmt"
 	"hash/crc32"
 	"image"
-	"image/color"
 	"image/png"
 	"io"
 )
 
-// ToPNG converts a single frame to PNG with auto transparency.
+var pngSignature = []byte{137, 80, 78, 71, 13, 10, 26, 10}
+
+// ToPNG converts a single frame to PNG with the game's transparency rule.
 func (f *Frame) ToPNG(palette *Palette, w io.Writer) error {
-	return f.ToPNGWith(palette, RenderOptions{Mode: TransparencyModeAuto}, w)
+	return f.ToPNGWith(palette, RenderOptions{}, w)
 }
 
-// ToPNGWith converts a single frame to PNG with explicit transparency options.
+// ToPNGWith converts a single frame to an indexed PNG with explicit
+// transparency options. Pixels keep their palette index (see ToImageWith);
+// the PLTE chunk holds the palette's colours and a tRNS chunk marks the one
+// transparent slot. Nothing is written if encoding fails.
 func (f *Frame) ToPNGWith(palette *Palette, opts RenderOptions, w io.Writer) error {
-	// Build palette
-	var pal color.Palette
-	if palette != nil {
-		pal = palette.ColorModel()
-	} else {
-		pal = FallbackPalette().ColorModel()
-	}
-
-	// Write PNG signature
-	if _, err := w.Write([]byte{137, 80, 78, 71, 13, 10, 26, 10}); err != nil {
-		return err
-	}
-
-	// Write IHDR chunk
-	ihdr := &bytes.Buffer{}
-	_ = binary.Write(ihdr, binary.BigEndian, uint32(f.Width))
-	_ = binary.Write(ihdr, binary.BigEndian, uint32(f.Height))
-	_ = binary.Write(ihdr, binary.BigEndian, uint8(8)) // bit depth
-	_ = binary.Write(ihdr, binary.BigEndian, uint8(3)) // color type (indexed)
-	_ = binary.Write(ihdr, binary.BigEndian, uint8(0)) // compression
-	_ = binary.Write(ihdr, binary.BigEndian, uint8(0)) // filter
-	_ = binary.Write(ihdr, binary.BigEndian, uint8(0)) // interlace
-	if err := writeChunk(w, "IHDR", ihdr.Bytes()); err != nil {
-		return err
-	}
-
-	// Write PLTE chunk (palette)
-	plte := &bytes.Buffer{}
-	for _, c := range pal {
-		r, g, b, _ := c.RGBA()
-		plte.WriteByte(byte(r >> 8))
-		plte.WriteByte(byte(g >> 8))
-		plte.WriteByte(byte(b >> 8))
-	}
-	if err := writeChunk(w, "PLTE", plte.Bytes()); err != nil {
-		return err
-	}
-
-	// Write tRNS chunk (transparency). resolveTransparency handles the TAK
-	// case where the on-disk metadata TI disagrees with the actual
-	// transparent pixel value (see formats/gaf/gaf.go for details). When
-	// the override disables transparency, every entry is fully opaque.
-	transIdx, apply := f.resolveTransparency(opts)
-	trns := make([]byte, len(pal))
-	for i := range trns {
-		trns[i] = 255 // Opaque by default
-	}
-	if apply {
-		trns[int(transIdx)] = 0
-	}
-	if err := writeChunk(w, "tRNS", trns); err != nil {
-		return err
-	}
-
-	// Encode image to get IDAT data
-	img := f.ToImageWith(palette, opts)
-	pngBuf := &bytes.Buffer{}
-	if err := png.Encode(pngBuf, img); err != nil {
-		return err
-	}
-
-	// Extract and write IDAT chunks
-	idatData, err := extractAllIDAT(pngBuf.Bytes())
+	img, ep := f.render(palette, opts)
+	idat, err := encodeIDAT(img, png.DefaultCompression)
 	if err != nil {
 		return err
 	}
-	if err := writeChunk(w, "IDAT", idatData); err != nil {
-		return err
-	}
 
-	// Write IEND chunk
-	return writeChunk(w, "IEND", nil)
+	var out bytes.Buffer
+	out.Write(pngSignature)
+	writeChunk(&out, "IHDR", ihdr(int(f.Width), int(f.Height)))
+	writeChunk(&out, "PLTE", plte(ep))
+	if t := trns(ep); t != nil {
+		writeChunk(&out, "tRNS", t)
+	}
+	writeChunk(&out, "IDAT", idat)
+	writeChunk(&out, "IEND", nil)
+	_, err = w.Write(out.Bytes())
+	return err
 }
 
-// ToAPNG converts a sequence to an animated PNG (APNG) using auto transparency.
+// ToAPNG converts a sequence to an animated PNG (APNG) using the game's
+// transparency rule.
 func (s *Sequence) ToAPNG(palette *Palette, w io.Writer) error {
-	return s.ToAPNGWith(palette, RenderOptions{Mode: TransparencyModeAuto}, w)
+	return s.ToAPNGWith(palette, RenderOptions{}, w)
 }
 
 // ToAPNGWith converts a sequence to an animated PNG (APNG) with explicit
-// transparency options.
+// transparency options. Frames are placed as in ToGIFWith. Each frame's
+// delay is its DisplayTicks over 30 seconds, exactly the game's timing, and
+// the animation loops forever when the sequence loops (Sequence.Loops) and
+// plays once otherwise. A one-frame sequence is written as a still PNG of
+// that frame. Nothing is written if encoding fails.
 func (s *Sequence) ToAPNGWith(palette *Palette, opts RenderOptions, w io.Writer) error {
 	if len(s.Frames) == 0 {
 		return fmt.Errorf("no frames in sequence")
 	}
 
 	// For single frame, just write PNG with the same options.
-	if len(s.Frames) == 1 {
+	if len(s.Frames) == 1 && s.Frames[0] != nil {
 		return s.Frames[0].ToPNGWith(palette, opts, w)
 	}
 
-	// Calculate canvas dimensions using same logic as GIF
-	var minX, minY, maxX, maxY int16
-	for i, frame := range s.Frames {
-		if frame == nil {
-			continue
-		}
-		left := -frame.OriginX
-		top := -frame.OriginY
-		right := int16(frame.Width) - frame.OriginX
-		bottom := int16(frame.Height) - frame.OriginY
-
-		if i == 0 || left < minX {
-			minX = left
-		}
-		if i == 0 || top < minY {
-			minY = top
-		}
-		if i == 0 || right > maxX {
-			maxX = right
-		}
-		if i == 0 || bottom > maxY {
-			maxY = bottom
-		}
-	}
-
-	canvasWidth := int(maxX - minX)
-	canvasHeight := int(maxY - minY)
-
-	// Resolve transparency once from the first frame so the APNG palette
-	// is built around what will actually render as transparent.
-	transparencyIndex := uint8(0)
-	applyTransparency := true
-	if len(s.Frames) > 0 && s.Frames[0] != nil {
-		transparencyIndex, applyTransparency = s.Frames[0].resolveTransparency(opts)
-	}
-
-	// Build palette
-	var pal color.Palette
-	if palette != nil {
-		pal = palette.ColorModel()
-	} else {
-		pal = FallbackPalette().ColorModel()
-	}
-
-	// Write PNG signature
-	if _, err := w.Write([]byte{137, 80, 78, 71, 13, 10, 26, 10}); err != nil {
+	sc, err := s.renderCanvases(palette, opts)
+	if err != nil {
 		return err
 	}
 
-	// Write IHDR chunk
-	ihdr := &bytes.Buffer{}
-	_ = binary.Write(ihdr, binary.BigEndian, uint32(canvasWidth))
-	_ = binary.Write(ihdr, binary.BigEndian, uint32(canvasHeight))
-	_ = binary.Write(ihdr, binary.BigEndian, uint8(8)) // bit depth
-	_ = binary.Write(ihdr, binary.BigEndian, uint8(3)) // color type (indexed)
-	_ = binary.Write(ihdr, binary.BigEndian, uint8(0)) // compression
-	_ = binary.Write(ihdr, binary.BigEndian, uint8(0)) // filter
-	_ = binary.Write(ihdr, binary.BigEndian, uint8(0)) // interlace
-	if err := writeChunk(w, "IHDR", ihdr.Bytes()); err != nil {
-		return err
-	}
+	var out bytes.Buffer
+	out.Write(pngSignature)
+	writeChunk(&out, "IHDR", ihdr(sc.width, sc.height))
 
-	// Write acTL chunk (animation control) - MUST come before IDAT
-	actl := &bytes.Buffer{}
-	_ = binary.Write(actl, binary.BigEndian, uint32(len(s.Frames))) // num_frames
-	_ = binary.Write(actl, binary.BigEndian, uint32(0))             // num_plays (0 = infinite)
-	if err := writeChunk(w, "acTL", actl.Bytes()); err != nil {
-		return err
+	// acTL (animation control) must come before IDAT.
+	actl := make([]byte, 8)
+	binary.BigEndian.PutUint32(actl[0:], uint32(len(sc.images))) // num_frames
+	plays := uint32(0)                                           // loop forever
+	if !s.Loops() {
+		plays = 1
 	}
+	binary.BigEndian.PutUint32(actl[4:], plays) // num_plays
+	writeChunk(&out, "acTL", actl)
 
-	// Write PLTE chunk (palette)
-	plte := &bytes.Buffer{}
-	for _, c := range pal {
-		r, g, b, _ := c.RGBA()
-		_ = plte.WriteByte(byte(r >> 8))
-		_ = plte.WriteByte(byte(g >> 8))
-		_ = plte.WriteByte(byte(b >> 8))
-	}
-	if err := writeChunk(w, "PLTE", plte.Bytes()); err != nil {
-		return err
-	}
-
-	// Write tRNS chunk (transparency). When the caller asked for "none",
-	// every entry stays opaque.
-	trns := make([]byte, len(pal))
-	for i := range trns {
-		trns[i] = 255
-	}
-	if applyTransparency {
-		trns[int(transparencyIndex)] = 0
-	}
-	if err := writeChunk(w, "tRNS", trns); err != nil {
-		return err
+	writeChunk(&out, "PLTE", plte(sc.palette))
+	if t := trns(sc.palette); t != nil {
+		writeChunk(&out, "tRNS", t)
 	}
 
 	sequenceNumber := uint32(0)
+	for frameIdx, canvas := range sc.images {
+		delay := uint16(s.Frames[frameIdx].DisplayTicks())
 
-	// Write frames
-	for frameIdx, frame := range s.Frames {
-		if frame == nil {
-			continue
-		}
-
-		// Calculate frame position on canvas
-		offsetX := int(-minX) - int(frame.OriginX)
-		offsetY := int(-minY) - int(frame.OriginY)
-
-		// Create canvas for this frame
-		canvas := image.NewPaletted(
-			image.Rect(0, 0, canvasWidth, canvasHeight),
-			pal,
-		)
-
-		// Fill with transparent pixels
-		for i := range canvas.Pix {
-			canvas.Pix[i] = transparencyIndex
-		}
-
-		// Copy frame pixels to canvas (carry the same transparency options
-		// through so the per-frame palette matches the APNG global palette).
-		frameImg := frame.ToImageWith(palette, opts)
-
-		compositeFrameOntoCanvas(canvas, frameImg, frame, offsetX, offsetY,
-			transparencyIndex, applyTransparency, opts)
-
-		// Calculate delay
-		delay := uint16((frame.Duration * 100) / 30)
-		if delay == 0 {
-			delay = 10 // Default ~100ms (10/100 = 0.1s)
-		}
-
-		// Write fcTL chunk (frame control)
-		fctl := &bytes.Buffer{}
-		_ = binary.Write(fctl, binary.BigEndian, sequenceNumber)       // sequence_number
-		_ = binary.Write(fctl, binary.BigEndian, uint32(canvasWidth))  // width (full canvas)
-		_ = binary.Write(fctl, binary.BigEndian, uint32(canvasHeight)) // height (full canvas)
-		_ = binary.Write(fctl, binary.BigEndian, uint32(0))            // x_offset (always 0 for full canvas)
-		_ = binary.Write(fctl, binary.BigEndian, uint32(0))            // y_offset (always 0 for full canvas)
-		_ = binary.Write(fctl, binary.BigEndian, delay)                // delay_num
-		_ = binary.Write(fctl, binary.BigEndian, uint16(100))          // delay_den
-		_ = binary.Write(fctl, binary.BigEndian, uint8(1))             // dispose_op (1 = source, replace)
-		_ = binary.Write(fctl, binary.BigEndian, uint8(0))             // blend_op (0 = clear to transparency)
-		if err := writeChunk(w, "fcTL", fctl.Bytes()); err != nil {
-			return err
-		}
+		// fcTL (frame control): every frame covers the whole canvas.
+		fctl := make([]byte, 26)
+		binary.BigEndian.PutUint32(fctl[0:], sequenceNumber)
+		binary.BigEndian.PutUint32(fctl[4:], uint32(sc.width))
+		binary.BigEndian.PutUint32(fctl[8:], uint32(sc.height))
+		binary.BigEndian.PutUint32(fctl[12:], 0)              // x_offset
+		binary.BigEndian.PutUint32(fctl[16:], 0)              // y_offset
+		binary.BigEndian.PutUint16(fctl[20:], delay)          // delay_num: ticks
+		binary.BigEndian.PutUint16(fctl[22:], TicksPerSecond) // delay_den
+		fctl[24] = 1                                          // dispose_op: APNG_DISPOSE_OP_BACKGROUND
+		fctl[25] = 0                                          // blend_op: APNG_BLEND_OP_SOURCE (replace)
+		writeChunk(&out, "fcTL", fctl)
 		sequenceNumber++
 
-		// Encode full canvas
-		var pngBuf bytes.Buffer
-		encoder := png.Encoder{CompressionLevel: png.NoCompression}
-		if err := encoder.Encode(&pngBuf, canvas); err != nil {
-			return err
-		}
-
-		// Extract ALL IDAT data from PNG (can be multiple chunks).
-		idatData, err := extractAllIDAT(pngBuf.Bytes())
+		idat, err := encodeIDAT(canvas, png.NoCompression)
 		if err != nil {
 			return fmt.Errorf("frame %d: %w", frameIdx, err)
 		}
-		// First frame uses IDAT, subsequent frames use fdAT
+		// First frame uses IDAT, subsequent frames use fdAT.
 		if frameIdx == 0 {
-			if err := writeChunk(w, "IDAT", idatData); err != nil {
-				return err
-			}
+			writeChunk(&out, "IDAT", idat)
 		} else {
-			fdat := &bytes.Buffer{}
-			_ = binary.Write(fdat, binary.BigEndian, sequenceNumber) // sequence_number
-			_, _ = fdat.Write(idatData)
-			if err := writeChunk(w, "fdAT", fdat.Bytes()); err != nil {
-				return err
-			}
+			fdat := make([]byte, 4, 4+len(idat))
+			binary.BigEndian.PutUint32(fdat, sequenceNumber)
+			writeChunk(&out, "fdAT", append(fdat, idat...))
 			sequenceNumber++
 		}
 	}
 
-	// Write IEND chunk
-	return writeChunk(w, "IEND", nil)
+	writeChunk(&out, "IEND", nil)
+	_, err = w.Write(out.Bytes())
+	return err
 }
 
-// writeChunk writes a PNG chunk with length, type, data, and CRC
-func writeChunk(w io.Writer, chunkType string, data []byte) error {
-	// Length
-	if err := binary.Write(w, binary.BigEndian, uint32(len(data))); err != nil {
-		return err
+// ihdr returns an IHDR payload for an 8-bit indexed image.
+func ihdr(width, height int) []byte {
+	b := make([]byte, 13)
+	binary.BigEndian.PutUint32(b[0:], uint32(width))
+	binary.BigEndian.PutUint32(b[4:], uint32(height))
+	b[8] = 8  // bit depth
+	b[9] = 3  // colour type: indexed
+	b[10] = 0 // compression
+	b[11] = 0 // filter
+	b[12] = 0 // interlace
+	return b
+}
+
+// plte returns the PLTE payload: the palette's own colours, including the
+// colour behind the transparent slot.
+func plte(ep exportPalette) []byte {
+	b := make([]byte, 0, 3*len(ep.rgb))
+	for _, c := range ep.rgb {
+		r, g, bl, _ := c.RGBA()
+		b = append(b, byte(r>>8), byte(g>>8), byte(bl>>8))
 	}
+	return b
+}
 
-	// Type + Data for CRC calculation
-	typeAndData := append([]byte(chunkType), data...)
-
-	// Type
-	if _, err := w.Write([]byte(chunkType)); err != nil {
-		return err
+// trns returns the tRNS payload marking the transparent slot, or nil when
+// the export has none.
+func trns(ep exportPalette) []byte {
+	if !ep.hasSlot {
+		return nil
 	}
-
-	// Data
-	if data != nil {
-		if _, err := w.Write(data); err != nil {
-			return err
-		}
+	b := make([]byte, len(ep.rgb))
+	for i := range b {
+		b[i] = 255
 	}
+	b[ep.slot] = 0
+	return b
+}
 
-	// CRC
-	crc := crc32.ChecksumIEEE(typeAndData)
-	return binary.Write(w, binary.BigEndian, crc)
+// encodeIDAT encodes img with the standard PNG encoder and returns its image
+// data (the concatenated IDAT payloads).
+func encodeIDAT(img *image.Paletted, level png.CompressionLevel) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := png.Encoder{CompressionLevel: level}
+	if err := enc.Encode(&buf, img); err != nil {
+		return nil, err
+	}
+	return extractAllIDAT(buf.Bytes())
+}
+
+// writeChunk appends a PNG chunk with length, type, data, and CRC.
+func writeChunk(out *bytes.Buffer, chunkType string, data []byte) {
+	var n [4]byte
+	binary.BigEndian.PutUint32(n[:], uint32(len(data)))
+	out.Write(n[:])
+	crc := crc32.NewIEEE()
+	_, _ = crc.Write([]byte(chunkType))
+	_, _ = crc.Write(data)
+	out.WriteString(chunkType)
+	out.Write(data)
+	binary.BigEndian.PutUint32(n[:], crc.Sum32())
+	out.Write(n[:])
 }
 
 // extractAllIDAT concatenates every IDAT chunk payload from a complete PNG
