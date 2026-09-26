@@ -1,4 +1,3 @@
-// Package tnt implements reading of Total Annihilation TNT map files.
 package tnt
 
 import (
