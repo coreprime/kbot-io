@@ -254,3 +254,17 @@ func TestCheckFunctions(t *testing.T) {
 		t.Error("CheckName")
 	}
 }
+
+func TestMarshalNilMapIsAbsent(t *testing.T) {
+	type rec struct {
+		Name   string         `tdf:",name"`
+		Damage map[string]int `tdf:"damage"`
+	}
+	out, err := Marshal([]rec{{Name: "A"}, {Name: "B", Damage: map[string]int{}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(out), "[damage]") != 1 {
+		t.Errorf("a nil map is absent, an empty one present:\n%s", out)
+	}
+}

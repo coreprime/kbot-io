@@ -28,6 +28,7 @@ import (
 //   - map[string]scalar: a section whose keys are dynamic (e.g. [DAMAGE])
 //   - map[string]string tagged `,remaining`: catch-all for unmatched keys
 //   - []struct tagged `,sections`: catch-all for unmatched child sections
+//   - Meta tagged `,meta`: records presence, order and text (see Meta)
 //
 // Keys and section names match ignoring ASCII case. A key assigned more than
 // once keeps its last value, whatever the case of each assignment, as in the
@@ -35,8 +36,8 @@ import (
 // the game's lookups do; the later ones go to the `,sections` catch-all when
 // there is one. When a value's text would not be written back the same way
 // (such as "13O", read as 13), the typed field gets the game's value and the
-// text is also kept in the `,remaining` catch-all, so a round trip reproduces
-// it.
+// text is also kept in the `,remaining` catch-all, unless the struct has a
+// Meta, so a round trip reproduces it.
 func Unmarshal(data []byte, v any) error {
 	return UnmarshalWith(data, v, ParseOptions{})
 }
@@ -80,7 +81,8 @@ type decodeState struct {
 	spec      structSpec
 	remaining reflect.Value
 	remKeys   map[string]string // folded key -> key as stored in remaining
-	taken     map[int]bool      // indexes into spec.fields of single sections already filled
+	meta      *Meta
+	taken     map[int]bool // indexes into spec.fields of single sections already filled
 }
 
 // decodeStruct fills rv (a struct) from a list of child elements.
@@ -96,6 +98,10 @@ func decodeStruct(children []*element, rv reflect.Value) error {
 			st.remKeys[foldKey(k.String())] = k.String()
 		}
 	}
+	if st.spec.metaIndex != nil {
+		st.meta = metaTarget(rv.FieldByIndex(st.spec.metaIndex))
+		*st.meta = Meta{}
+	}
 
 	for _, child := range children {
 		if child.section {
@@ -109,6 +115,17 @@ func decodeStruct(children []*element, rv reflect.Value) error {
 		}
 	}
 	return nil
+}
+
+// metaTarget returns the Meta behind a Meta or *Meta field, allocating it.
+func metaTarget(f reflect.Value) *Meta {
+	if f.Kind() == reflect.Pointer {
+		if f.IsNil() {
+			f.Set(reflect.New(metaType))
+		}
+		return f.Interface().(*Meta)
+	}
+	return f.Addr().Interface().(*Meta)
 }
 
 // setRemaining stores key=value in the catch-all, replacing an earlier case
@@ -132,6 +149,9 @@ func (st *decodeState) dropRemaining(key string) {
 }
 
 func (st *decodeState) field(child *element) error {
+	if st.meta != nil {
+		st.meta.recordField(child.key, child.value)
+	}
 	if fs, ok := st.spec.fieldByName(child.key); ok {
 		f := st.rv.FieldByIndex(fs.index)
 		switch cat := categorize(f.Type()); cat {
@@ -154,7 +174,7 @@ func (st *decodeState) field(child *element) error {
 				st.setRemaining(child.key, child.value)
 				return nil
 			}
-			if st.remaining.IsValid() && cat == catScalar && !rendersAlike(f, child.value) {
+			if st.remaining.IsValid() && st.meta == nil && cat == catScalar && !rendersAlike(f, child.value) {
 				st.setRemaining(child.key, child.value)
 			} else if st.remaining.IsValid() {
 				st.dropRemaining(child.key)
@@ -176,6 +196,10 @@ func (st *decodeState) field(child *element) error {
 
 func (st *decodeState) section(child *element) error {
 	u := foldKey(child.key)
+	entry := -1
+	if st.meta != nil {
+		entry = st.meta.recordSection(child.key)
+	}
 
 	// Exact-name match for single sections and dynamic-key maps. The first
 	// section of a name fills the field, as the game's lookups find the
@@ -198,7 +222,12 @@ func (st *decodeState) section(child *element) error {
 		if cat == catSection {
 			return decodeElement(child, sectionTarget(f))
 		}
-		return decodeMap(child, f)
+		var sub *Meta
+		if entry >= 0 {
+			sub = &Meta{}
+			st.meta.entries[entry].sub = sub
+		}
+		return decodeMap(child, f, sub)
 	}
 
 	// Prefix match for repeated section slices (e.g. GADGET0..GADGETn). A
@@ -250,7 +279,8 @@ func sectionTarget(f reflect.Value) reflect.Value {
 
 // decodeMap fills a map field from a section's fields. Case variants of a key
 // merge into one entry holding the last value, spelled as first written.
-func decodeMap(child *element, f reflect.Value) error {
+// sub, when set, records the section's keys, order and text.
+func decodeMap(child *element, f reflect.Value, sub *Meta) error {
 	if f.IsNil() {
 		f.Set(reflect.MakeMap(f.Type()))
 	}
@@ -272,6 +302,9 @@ func decodeMap(child *element, f reflect.Value) error {
 			key = old
 		} else {
 			keys[foldKey(key)] = key
+		}
+		if sub != nil {
+			sub.recordField(key, c.value)
 		}
 		f.SetMapIndex(reflect.ValueOf(key), ev)
 	}

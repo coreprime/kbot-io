@@ -271,8 +271,8 @@ func TestRoundTripGeneric(t *testing.T) {
 }
 
 // roundTripCompare is how these tests compare a file with its re-marshalled
-// form. The structs do not record key presence or source text yet, so Marshal
-// leaves out explicit zero values and normalises list spacing; both
-// differences are ignored here, and the comparison becomes plain
-// tdf.SemanticEqual once they do.
+// form. The structs have no tdf.Meta yet, so Marshal leaves out explicit zero
+// values and normalises list spacing; both differences are ignored here, and
+// the comparison becomes plain tdf.SemanticEqual once the structs record key
+// presence and source text.
 var roundTripCompare = tdf.CompareOptions{AbsentIsZero: true, CollapseSpace: true}

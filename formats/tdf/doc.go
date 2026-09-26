@@ -93,8 +93,16 @@
 // (see Unmarshal for the tag forms). A struct field matching several sections
 // takes the first; map entries and catch-all keys that differ only in case
 // merge into one holding the last value. A value whose text would not be
-// written back the same way (such as "13O", read as 13) also keeps its text in
-// the struct's ",remaining" catch-all, so Marshal reproduces it.
+// written back the same way (such as "13O", read as 13) keeps its text, in the
+// struct's Meta or else its ",remaining" catch-all, so Marshal reproduces it.
+//
+// A missing key and an explicit zero are different things to the game, which
+// applies its own default, often not zero, to a missing key. Pointer fields
+// (nil when absent) and a Meta field tagged `tdf:",meta"` let a struct tell
+// them apart; with a Meta, Marshal writes every key the source had, even when
+// zero, keeps unchanged values' text byte for byte, and keeps the source's key
+// order and spelling. Without either, an omitempty field that is zero is left
+// out, which drops explicit zeros. See Meta.
 //
 // Writers refuse keys, values and section names the grammar cannot carry
 // (see CheckKey, CheckValue and CheckName): the grammar has no escaping, so a

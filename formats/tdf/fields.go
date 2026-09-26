@@ -28,6 +28,7 @@ type fieldSpec struct {
 	isName      bool   // captures/emits the enclosing section's header name
 	isRemaining bool   // map[string]string catch-all for unmatched scalar keys
 	isSections  bool   // []struct catch-all for unmatched child sections
+	isMeta      bool   // Meta recording the source's keys, order and text
 	countKey    string // for repeated sections: sibling scalar key holding the count
 	delimiter   string // for scalar slices: the value separator (default whitespace)
 }
@@ -40,6 +41,7 @@ type structSpec struct {
 	nameIndex      []int
 	remainingIndex []int
 	sectionsIndex  []int
+	metaIndex      []int
 	countKeys      map[string]bool // folded sibling count keys managed by repeats= fields
 }
 
@@ -103,6 +105,8 @@ func collectFields(t reflect.Type, prefix []int, s *structSpec) {
 				fs.isRemaining = true
 			case o == "sections":
 				fs.isSections = true
+			case o == "meta":
+				fs.isMeta = true
 			case strings.HasPrefix(o, "repeats="):
 				fs.countKey = strings.TrimSpace(strings.TrimPrefix(o, "repeats="))
 			case strings.HasPrefix(o, "delimiter="):
@@ -117,6 +121,13 @@ func collectFields(t reflect.Type, prefix []int, s *structSpec) {
 		}
 		if fs.isSections {
 			s.sectionsIndex = fs.index
+		}
+		if fs.isMeta {
+			if f.Type != metaType && f.Type != reflect.PointerTo(metaType) {
+				continue // ,meta on anything but Meta or *Meta is ignored
+			}
+			s.metaIndex = fs.index
+			continue
 		}
 		if fs.countKey != "" {
 			if s.countKeys == nil {
@@ -166,6 +177,8 @@ func appendIndex(prefix []int, i int) []int {
 	out[len(prefix)] = i
 	return out
 }
+
+var metaType = reflect.TypeOf(Meta{})
 
 // fieldByName returns the first non-special tagged field matching name,
 // ignoring ASCII case.

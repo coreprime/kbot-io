@@ -9,8 +9,9 @@ import (
 // whose source text does not fit their type: text such as "13O" or "2, 4" in a
 // numeric field, "true" in a flag, or anything a custom scalar type refused.
 // The game reads such text with its own number rules (Atol, Atof, Flag), which
-// is what Unmarshal stores in the field; the text itself is kept in the
-// struct's ",remaining" catch-all so the document still round-trips. Because the text is preserved, a byte-level round-trip
+// is what Unmarshal stores in the field; the text itself is kept (in the
+// struct's Meta, or otherwise in its ",remaining" catch-all) so the document
+// still round-trips. Because the text is preserved, a byte-level round-trip
 // check cannot reveal the mismatch, but it is almost always a mis-typed struct
 // field or genuinely malformed game data. Empty values and plain numerals (such
 // as "1.5" in an integer field) are not reported.
@@ -44,6 +45,24 @@ func walkMisparse(rv reflect.Value, out *[]string, seen map[string]bool) {
 		}
 	case reflect.Struct:
 		spec := specFor(rv.Type())
+		if meta := structMeta(rv, spec); meta != nil {
+			for _, fs := range spec.fields {
+				if fs.isName || fs.isRemaining || fs.isSections {
+					continue
+				}
+				f := rv.FieldByIndex(fs.index)
+				if categorize(f.Type()) != catScalar {
+					continue
+				}
+				raw, ok := meta.Raw(fs.key)
+				if !ok || !misfit(raw) {
+					continue
+				}
+				if same, parsed := decodesTo(f, raw, false, ""); (same || !parsed) && !rendersAlike(f, raw) {
+					*out = append(*out, fmt.Sprintf("%s.%s=%s", rv.Type().Name(), fs.key, raw))
+				}
+			}
+		}
 		if spec.remainingIndex != nil {
 			rem := rv.FieldByIndex(spec.remainingIndex)
 			if rem.Kind() == reflect.Map && !rem.IsNil() {
