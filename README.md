@@ -42,6 +42,14 @@ Files the game would refuse are repaired and reported by default
 them with the byte offset instead. Writers refuse keys and values the grammar
 cannot carry, such as a `;` in a value or a URL's `//`.
 
+TA: Kingdoms text is read with the same TA 3.1c grammar by default. Three
+retail TA: Kingdoms files (`features/zhon/zonruin.tdf`,
+`translate/messages.tdf`, `translate/customkeys.tdf`) have stray text that
+now joins the following key, as it does in TA 3.1c;
+`ParseOptions{SkipStrayText: true}` drops it instead, as earlier versions did.
+`Strict` refuses those files and TA: Kingdoms' `.gui` files, which are not TDF
+text. See the `formats/gamedata/tak` package documentation.
+
 A struct gains a `tdf.Meta` field tagged `tdf:",meta"` to tell a missing key
 from an explicit zero (the game applies non-zero defaults to many missing
 keys): `Marshal` then writes every key the source had, keeps unchanged values'

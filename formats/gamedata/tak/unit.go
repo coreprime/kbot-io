@@ -8,6 +8,30 @@
 // are preserved in a Remaining map so every file round-trips losslessly. Fields
 // shared with Total Annihilation are factored into embedded base types from the
 // common package.
+//
+// # Reading TA: Kingdoms text
+//
+// The tdf package reads every file with the TA 3.1c grammar by default, and
+// that includes TA: Kingdoms data; whether TA: Kingdoms' own reader follows
+// the same rules in every case is not established. Three retail TA: Kingdoms
+// files read differently under that grammar than under the line-based reader
+// of earlier versions of this module, because stray text joins the key that
+// follows it:
+//
+//   - features/zhon/zonruin.tdf: a line holding only ';' joins the next key,
+//     so [ZonRuin12] loses its damage value;
+//   - translate/messages.tdf: a ';' inside the French text of
+//     [DO_YOU_WANT_TO_WATCH_GAME] ends that value, and the rest joins the
+//     Italian key, which is lost;
+//   - translate/customkeys.tdf: "English = ;;" in [SYMBOL_3B] swallows the
+//     [SYMBOL_3C] section that follows.
+//
+// Callers who want the earlier handling, which drops such stray text, can read
+// with tdf.UnmarshalWith(data, &v, tdf.ParseOptions{SkipStrayText: true}) or
+// tdf.ParseWith. ParseOptions.Strict applies the TA 3.1c rules for refusing a
+// file, so it refuses those files and TA: Kingdoms' .gui files, which are not
+// TDF text at all (they are lists of numbers and names; the default reader
+// finds no fields in them).
 package tak
 
 import "github.com/coreprime/kbot-io/formats/gamedata/common"
