@@ -140,3 +140,9 @@ func isNumeral(s string) bool {
 	num, end := numeralPrefix(s)
 	return num != "" && end == len(s)
 }
+
+// numeralsEqual reports whether a and b are both plain numerals that every
+// game number reader (Atol, Atof, and those built on them) reads alike.
+func numeralsEqual(a, b string) bool {
+	return isNumeral(a) && isNumeral(b) && Atol(a) == Atol(b) && Atof(a) == Atof(b)
+}

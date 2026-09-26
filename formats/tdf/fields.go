@@ -23,7 +23,7 @@ const (
 type fieldSpec struct {
 	index       []int
 	key         string // original-case tag key, used when emitting
-	ukey        string // upper-cased key, used when matching (TDF is case-insensitive)
+	ukey        string // key with ASCII letters upper-cased, used when matching
 	omitempty   bool
 	isName      bool   // captures/emits the enclosing section's header name
 	isRemaining bool   // map[string]string catch-all for unmatched scalar keys
@@ -40,7 +40,7 @@ type structSpec struct {
 	nameIndex      []int
 	remainingIndex []int
 	sectionsIndex  []int
-	countKeys      map[string]bool // upper-cased sibling count keys managed by repeats= fields
+	countKeys      map[string]bool // folded sibling count keys managed by repeats= fields
 }
 
 var specCache sync.Map // reflect.Type -> structSpec
@@ -90,7 +90,7 @@ func collectFields(t reflect.Type, prefix []int, s *structSpec) {
 		fs := fieldSpec{
 			index: appendIndex(prefix, i),
 			key:   strings.TrimSpace(parts[0]),
-			ukey:  strings.ToUpper(strings.TrimSpace(parts[0])),
+			ukey:  foldKey(strings.TrimSpace(parts[0])),
 		}
 		for _, o := range parts[1:] {
 			o = strings.TrimSpace(o)
@@ -122,7 +122,7 @@ func collectFields(t reflect.Type, prefix []int, s *structSpec) {
 			if s.countKeys == nil {
 				s.countKeys = map[string]bool{}
 			}
-			s.countKeys[strings.ToUpper(fs.countKey)] = true
+			s.countKeys[foldKey(fs.countKey)] = true
 		}
 		s.fields = append(s.fields, fs)
 	}
@@ -167,9 +167,10 @@ func appendIndex(prefix []int, i int) []int {
 	return out
 }
 
-// fieldByName returns the first non-special tagged field matching name.
+// fieldByName returns the first non-special tagged field matching name,
+// ignoring ASCII case.
 func (s structSpec) fieldByName(name string) (fieldSpec, bool) {
-	u := strings.ToUpper(name)
+	u := foldKey(name)
 	for _, fs := range s.fields {
 		if fs.isName || fs.isRemaining || fs.isSections {
 			continue

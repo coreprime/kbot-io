@@ -6,161 +6,6 @@ import (
 	"strings"
 )
 
-// element is the parsed representation of a single statement in a TDF file:
-// either a key=value field or a [name]{ ... } section containing more elements.
-//
-// It deliberately preserves field/section ordering and duplicate sibling names
-// so that documents can be re-emitted without losing structure.
-type element struct {
-	key      string     // field key, or section header name
-	value    string     // raw, trimmed field value (sections leave this empty)
-	section  bool       // true when this is a [name]{ ... } block
-	children []*element // child elements for sections
-}
-
-// parser walks a comment-stripped TDF source string.
-type parser struct {
-	src string
-	pos int
-}
-
-// parseDocument parses raw TDF bytes into the top-level element list.
-func parseDocument(data []byte) ([]*element, error) {
-	p := &parser{src: stripComments(string(data))}
-	return p.parseBody(true)
-}
-
-// stripComments removes // line comments and /* */ block comments. TDF has no
-// string-quoting, and no game value contains "//" or "/*", so a single global
-// pass is safe. Block comments collapse to a single space to avoid gluing
-// neighbouring tokens together.
-func stripComments(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for i, n := 0, len(s); i < n; {
-		if s[i] == '/' && i+1 < n && s[i+1] == '/' {
-			j := i + 2
-			for j < n && s[j] != '\n' {
-				j++
-			}
-			i = j
-			continue
-		}
-		if s[i] == '/' && i+1 < n && s[i+1] == '*' {
-			j := i + 2
-			for j+1 < n && (s[j] != '*' || s[j+1] != '/') {
-				j++
-			}
-			if j+1 < n {
-				j += 2
-			} else {
-				j = n
-			}
-			b.WriteByte(' ')
-			i = j
-			continue
-		}
-		b.WriteByte(s[i])
-		i++
-	}
-	return b.String()
-}
-
-func (p *parser) skipSpace() {
-	for p.pos < len(p.src) {
-		switch p.src[p.pos] {
-		case ' ', '\t', '\r', '\n', '\f', '\v':
-			p.pos++
-		default:
-			return
-		}
-	}
-}
-
-// parseBody reads elements until a closing brace (when top is false) or EOF.
-func (p *parser) parseBody(top bool) ([]*element, error) {
-	var out []*element
-	for {
-		p.skipSpace()
-		if p.pos >= len(p.src) {
-			// Lenient: a missing closing '}' at EOF auto-closes open sections
-			// rather than failing, so slightly truncated files still parse.
-			return out, nil
-		}
-		switch p.src[p.pos] {
-		case '}':
-			p.pos++
-			if top {
-				continue // stray brace at top level
-			}
-			return out, nil
-		case '{', ';':
-			p.pos++ // stray opening brace or empty statement
-		case '[':
-			el, err := p.parseSection()
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, el)
-		default:
-			if el, ok := p.parseField(); ok {
-				out = append(out, el)
-			}
-		}
-	}
-}
-
-func (p *parser) parseSection() (*element, error) {
-	p.pos++ // consume '['
-	end := strings.IndexByte(p.src[p.pos:], ']')
-	if end < 0 {
-		return nil, fmt.Errorf("tdf: unterminated section header")
-	}
-	name := strings.TrimSpace(p.src[p.pos : p.pos+end])
-	p.pos += end + 1
-	p.skipSpace()
-	if p.pos >= len(p.src) || p.src[p.pos] != '{' {
-		return &element{key: name, section: true}, nil
-	}
-	p.pos++ // consume '{'
-	children, err := p.parseBody(false)
-	if err != nil {
-		return nil, err
-	}
-	return &element{key: name, section: true, children: children}, nil
-}
-
-// parseField reads "key = value;". The value runs to the next ';' or '}', so it
-// may contain spaces and '=' characters (e.g. yardmaps). A token with no '='
-// before a terminator is discarded.
-func (p *parser) parseField() (*element, bool) {
-	start := p.pos
-	for p.pos < len(p.src) {
-		switch p.src[p.pos] {
-		case '=':
-			key := strings.TrimSpace(p.src[start:p.pos])
-			p.pos++ // consume '='
-			vstart := p.pos
-			for p.pos < len(p.src) && p.src[p.pos] != ';' && p.src[p.pos] != '}' {
-				p.pos++
-			}
-			value := strings.TrimSpace(p.src[vstart:p.pos])
-			if p.pos < len(p.src) && p.src[p.pos] == ';' {
-				p.pos++
-			}
-			return &element{key: key, value: value}, true
-		case ';', '}', '{', '[':
-			if p.pos == start {
-				p.pos++
-			}
-			return nil, false
-		default:
-			p.pos++
-		}
-	}
-	return nil, false
-}
-
 // tokenWriter is the subset of writer behaviour the TDF emitter needs. Both
 // *strings.Builder (in-memory Marshal/Canonicalize) and *bufio.Writer (the
 // streaming Encoder) satisfy it.
@@ -220,9 +65,11 @@ func (e *errWriter) writeElem(el *element, depth int) {
 	e.str(";\n")
 }
 
-// Canonicalize parses TDF bytes and re-emits them with normalised whitespace and
-// comments stripped, preserving every section and field value verbatim. Running
-// it twice is idempotent, which makes it a useful lossless round-trip check.
+// Canonicalize parses TDF bytes and re-emits them with normalised whitespace
+// and comments removed, keeping every section (in order, duplicates included)
+// and every field value exactly as the game reads it. Text after a stray '}'
+// outside any section is dropped, as the game ignores it. Running it twice is
+// idempotent.
 func Canonicalize(data []byte) ([]byte, error) {
 	els, err := parseDocument(data)
 	if err != nil {
@@ -300,7 +147,7 @@ func group(els []*element) (fields map[string][]string, sections map[string][]*e
 	fields = map[string][]string{}
 	sections = map[string][]*element{}
 	for _, el := range els {
-		key := strings.ToUpper(el.key)
+		key := foldKey(el.key)
 		if el.section {
 			sections[key] = append(sections[key], el)
 		} else {

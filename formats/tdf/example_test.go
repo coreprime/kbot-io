@@ -109,12 +109,16 @@ func ExampleSection_List() {
 }
 
 func ExampleSection_Bool() {
+	// Flags are read as the game reads them: bit 0 of the integer value.
+	// Words are not numbers, so they read as 0 (false).
 	content := `[UNITINFO]
 	{
 	Builder=1;
 	canmove=true;
 	Upright=yes;
 	NoAutoFire=0;
+	CanFly=2;
+	CanHover=3;
 	}`
 
 	doc, _ := tdf.ParseString(content)
@@ -124,12 +128,16 @@ func ExampleSection_Bool() {
 	fmt.Println("Can Move:", unit.Bool("canmove"))
 	fmt.Println("Upright:", unit.Bool("Upright"))
 	fmt.Println("No Auto Fire:", unit.Bool("NoAutoFire"))
+	fmt.Println("Can Fly:", unit.Bool("CanFly"))
+	fmt.Println("Can Hover:", unit.Bool("CanHover"))
 
 	// Output:
 	// Builder: true
-	// Can Move: true
-	// Upright: true
+	// Can Move: false
+	// Upright: false
 	// No Auto Fire: false
+	// Can Fly: false
+	// Can Hover: true
 }
 
 func ExampleDocument_WriteFile() {

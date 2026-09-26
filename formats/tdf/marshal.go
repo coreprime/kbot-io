@@ -12,6 +12,10 @@ import (
 // pointer to either. A slice produces one top-level [section] per element
 // (named by its `tdf:",name"` field); a struct produces its tagged fields and
 // nested sections at the top level. The inverse of Unmarshal.
+//
+// Fields are written in struct order, then catch-all entries sorted by key. A
+// value whose source text Unmarshal kept in the catch-all is written as that
+// text while it still reads as the field's value.
 func Marshal(v any) ([]byte, error) {
 	rv := reflect.ValueOf(v)
 	for rv.Kind() == reflect.Pointer {
@@ -65,9 +69,26 @@ func encodeElement(rv reflect.Value) (*element, error) {
 	return &element{key: name, section: true, children: children}, nil
 }
 
+// encoder is the per-struct state of encodeStruct.
+type encoder struct {
+	remaining reflect.Value
+	remKeys   map[string]string // folded key -> key in remaining
+	consumed  map[string]bool   // folded remaining keys a typed field handled
+}
+
 // encodeStruct renders a struct's tagged fields to an ordered element list.
 func encodeStruct(rv reflect.Value) ([]*element, error) {
 	spec := specFor(rv.Type())
+	enc := &encoder{consumed: map[string]bool{}}
+	if spec.remainingIndex != nil {
+		enc.remaining = rv.FieldByIndex(spec.remainingIndex)
+		enc.remKeys = map[string]string{}
+		if !enc.remaining.IsNil() {
+			for _, k := range enc.remaining.MapKeys() {
+				enc.remKeys[foldKey(k.String())] = k.String()
+			}
+		}
+	}
 	var out []*element
 
 	for _, fs := range spec.fields {
@@ -75,25 +96,15 @@ func encodeStruct(rv reflect.Value) ([]*element, error) {
 			continue
 		}
 		f := rv.FieldByIndex(fs.index)
-		switch categorize(f.Type()) {
-		case catScalar:
-			s, zero, err := getScalar(f)
+		switch cat := categorize(f.Type()); cat {
+		case catScalar, catScalarList:
+			el, err := enc.scalar(fs, f, cat == catScalarList)
 			if err != nil {
 				return nil, err
 			}
-			if fs.omitempty && zero {
-				continue
+			if el != nil {
+				out = append(out, el)
 			}
-			out = append(out, &element{key: fs.key, value: s})
-		case catScalarList:
-			if fs.omitempty && f.Len() == 0 {
-				continue
-			}
-			v, err := encodeScalarList(f, fs.delimiter)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, &element{key: fs.key, value: v})
 		case catSection:
 			if f.Kind() == reflect.Pointer && f.IsNil() {
 				continue
@@ -149,10 +160,59 @@ func encodeStruct(rv reflect.Value) ([]*element, error) {
 		}
 	}
 
-	if spec.remainingIndex != nil {
-		out = append(out, encodeRemaining(rv.FieldByIndex(spec.remainingIndex))...)
+	if enc.remaining.IsValid() && !enc.remaining.IsNil() {
+		keys := enc.remaining.MapKeys()
+		sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
+		for _, k := range keys {
+			if enc.consumed[foldKey(k.String())] {
+				continue
+			}
+			out = append(out, &element{key: k.String(), value: enc.remaining.MapIndex(k).String()})
+		}
 	}
 	return out, nil
+}
+
+// scalar renders one scalar or scalar-list field, or returns nil when it is
+// left out. A value still equal to the text it was read from (kept in the
+// catch-all) is written as that text.
+func (enc *encoder) scalar(fs fieldSpec, f reflect.Value, list bool) (*element, error) {
+	key := fs.key
+	var raw string
+	hasRaw := false
+	if rk, ok := enc.remKeys[fs.ukey]; ok {
+		enc.consumed[fs.ukey] = true
+		key, raw, hasRaw = rk, enc.remaining.MapIndex(reflect.ValueOf(rk)).String(), true
+	}
+	if hasRaw {
+		same, parsed := decodesTo(f, raw, list, fs.delimiter)
+		// Text that does not parse at all can only have come from a type
+		// that parses itself; while its field is still zero, keep the text.
+		if same || (!parsed && f.IsZero()) {
+			return &element{key: key, value: raw}, nil
+		}
+	}
+	if f.Kind() == reflect.Pointer && f.IsNil() {
+		return nil, nil
+	}
+	if list {
+		if fs.omitempty && f.Len() == 0 {
+			return nil, nil
+		}
+		v, err := encodeScalarList(f, fs.delimiter)
+		if err != nil {
+			return nil, err
+		}
+		return &element{key: key, value: v}, nil
+	}
+	s, zero, err := getScalar(f)
+	if err != nil {
+		return nil, fmt.Errorf("%w (key %s)", err, fs.key)
+	}
+	if fs.omitempty && zero {
+		return nil, nil
+	}
+	return &element{key: key, value: s}, nil
 }
 
 func encodeMap(f reflect.Value) ([]*element, error) {
@@ -167,17 +227,4 @@ func encodeMap(f reflect.Value) ([]*element, error) {
 		out = append(out, &element{key: k.String(), value: s})
 	}
 	return out, nil
-}
-
-func encodeRemaining(f reflect.Value) []*element {
-	if f.IsNil() {
-		return nil
-	}
-	keys := f.MapKeys()
-	sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
-	out := make([]*element, 0, len(keys))
-	for _, k := range keys {
-		out = append(out, &element{key: k.String(), value: f.MapIndex(k).String()})
-	}
-	return out
 }

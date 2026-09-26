@@ -305,14 +305,17 @@ func TestDecoderHandlesComments(t *testing.T) {
 	}
 }
 
-// streamParse drains every top-level element from the streaming parser, the
-// streaming analogue of parseDocument.
+// streamParse drains every top-level element from the parser fed one byte per
+// Read, the streaming analogue of parseDocument.
 func streamParse(t *testing.T, data []byte) []*element {
 	t.Helper()
-	p := &streamParser{r: &stripReader{r: bufio.NewReader(bytes.NewReader(data))}}
+	p, err := newParser(bufio.NewReaderSize(&oneByteReader{data: data}, 16), ParseOptions{})
+	if err != nil {
+		t.Fatalf("streamParse: %v", err)
+	}
 	var out []*element
 	for {
-		el, err := p.nextTopElement()
+		el, err := p.next()
 		if err != nil {
 			t.Fatalf("streamParse: %v", err)
 		}

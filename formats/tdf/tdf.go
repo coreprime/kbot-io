@@ -1,189 +1,105 @@
-// Package tdf implements reading and writing of Total Annihilation TDF/FBI files.
-//
-// TDF (Text Data File) and FBI (Feature/Building/Item) files share the same format:
-// - Section-based structure with [SECTION_NAME] headers
-// - Key-value pairs in format: key=value;
-// - Values enclosed in braces { }
-// - Case-insensitive keys
-// - Support for string, numeric, and list values
-//
-// Example usage:
-//
-//	// Reading
-//	doc, err := tdf.ParseFile("units/ARMCOM.FBI")
-//	section := doc.Section("UNITINFO")
-//	name := section.String("UnitName")
-//	cost := section.Int("BuildCostMetal")
-//
-//	// Writing
-//	doc := tdf.NewDocument()
-//	unit := doc.AddSection("UNITINFO")
-//	unit.SetString("UnitName", "ARMCOM")
-//	unit.SetInt("BuildCostMetal", 2500)
-//	doc.WriteFile("output.fbi")
 package tdf
 
 import (
-	"bufio"
-	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"strings"
 )
 
-// Document represents a complete TDF/FBI file
+// Document is a TDF text as a tree: its top-level fields and sections, each
+// section holding fields and nested sections, all in the order they were read.
+// Parse reads it with the same grammar as Unmarshal.
+//
+// Lookups ignore ASCII case, as the game's do. A key assigned more than once
+// in a section is one Field holding the last value (the one the game uses),
+// spelled and placed as first written. Sections with the same name are all
+// kept, in order; Section returns the first, as the game's lookups do.
 type Document struct {
-	sections     map[string]*Section
-	order        []string   // Preserve section order
-	rootSections []*Section // Top-level sections in order
+	root  *Section
+	diags []Diagnostic
 }
 
-// Section represents a [SECTION] in a TDF file
+// Section is a [name]{ ... } block of a Document, or the document's top level.
 type Section struct {
-	name     string
-	fields   map[string]*Field
-	order    []string // Preserve field order
-	sections []*Section
+	name  string
+	items []item
+	index map[string]*Field // folded key -> field
 }
 
-// Field represents a key-value pair in a section
+// item is one entry of a section: a field or a child section.
+type item struct {
+	field   *Field
+	section *Section
+}
+
+// Field is a key=value pair of a section.
 type Field struct {
 	key   string
 	value string
 }
 
-// Key returns the field key
+// Key returns the field key, spelled as first written.
 func (f *Field) Key() string {
 	return f.key
 }
 
-// Value returns the field value
+// Value returns the field value: its last assignment, trimmed of separators.
 func (f *Field) Value() string {
 	return f.value
 }
 
-// NewDocument creates a new empty TDF document
-func NewDocument() *Document {
-	return &Document{
-		sections:     make(map[string]*Section),
-		order:        make([]string, 0),
-		rootSections: make([]*Section, 0),
-	}
+func newSection(name string) *Section {
+	return &Section{name: name, index: map[string]*Field{}}
 }
 
-// Parse parses TDF content from a reader
+// NewDocument creates a new empty TDF document.
+func NewDocument() *Document {
+	return &Document{root: newSection("")}
+}
+
+// Parse reads TDF text from r the way the game does, repairing what the game
+// would refuse (see ParseOptions); Diagnostics lists what was found.
 func Parse(r io.Reader) (*Document, error) {
+	return ParseWith(r, ParseOptions{})
+}
+
+// ParseWith reads TDF text from r with explicit parse options.
+func ParseWith(r io.Reader, opts ParseOptions) (*Document, error) {
 	doc := NewDocument()
-	scanner := bufio.NewScanner(r)
-
-	var sectionStack []*Section
-	var pendingSection *Section
-	lineNum := 0
-
-	for scanner.Scan() {
-		lineNum++
-		line := strings.TrimSpace(scanner.Text())
-
-		// Skip empty lines and comments
-		if line == "" || strings.HasPrefix(line, "//") {
-			continue
-		}
-
-		// Check for section header [SECTIONNAME]
-		if strings.HasPrefix(line, "[") {
-			endBracket := strings.Index(line, "]")
-			if endBracket > 0 {
-				sectionName := strings.TrimSpace(line[1:endBracket])
-				pendingSection = &Section{
-					name:   sectionName,
-					fields: make(map[string]*Field),
-					order:  []string{},
-				}
-				continue
-			}
-		}
-
-		// Handle inline section: [NAME] { key=val; key=val; }
-		// or inline brace block: { key=val; key=val; }
-		hasBraceOpen := strings.Contains(line, "{")
-		hasBraceClose := strings.Contains(line, "}")
-
-		if hasBraceOpen && hasBraceClose {
-			// Inline block — open and close on the same line.
-			if pendingSection != nil {
-				if len(sectionStack) > 0 {
-					parent := sectionStack[len(sectionStack)-1]
-					parent.sections = append(parent.sections, pendingSection)
-				} else {
-					doc.rootSections = append(doc.rootSections, pendingSection)
-					doc.sections[strings.ToUpper(pendingSection.name)] = pendingSection
-					doc.order = append(doc.order, strings.ToUpper(pendingSection.name))
-				}
-				// Parse inline key=value pairs between { and }.
-				braceStart := strings.Index(line, "{")
-				braceEnd := strings.LastIndex(line, "}")
-				if braceStart >= 0 && braceEnd > braceStart {
-					inner := line[braceStart+1 : braceEnd]
-					for _, part := range strings.Split(inner, ";") {
-						part = strings.TrimSpace(part)
-						if idx := strings.Index(part, "="); idx > 0 {
-							key := strings.TrimSpace(part[:idx])
-							value := strings.TrimSpace(part[idx+1:])
-							pendingSection.Set(key, value)
-						}
-					}
-				}
-				pendingSection = nil
-			}
-			continue
-		}
-
-		// Check for opening brace
-		if hasBraceOpen {
-			if pendingSection != nil {
-				if len(sectionStack) > 0 {
-					parent := sectionStack[len(sectionStack)-1]
-					parent.sections = append(parent.sections, pendingSection)
-				} else {
-					doc.rootSections = append(doc.rootSections, pendingSection)
-					doc.sections[strings.ToUpper(pendingSection.name)] = pendingSection
-					doc.order = append(doc.order, strings.ToUpper(pendingSection.name))
-				}
-				sectionStack = append(sectionStack, pendingSection)
-				pendingSection = nil
-			}
-			continue
-		}
-
-		// Check for closing brace
-		if hasBraceClose {
-			if len(sectionStack) > 0 {
-				sectionStack = sectionStack[:len(sectionStack)-1]
-			}
-			continue
-		}
-
-		// Parse key=value pairs inside braces
-		if len(sectionStack) > 0 {
-			currentSection := sectionStack[len(sectionStack)-1]
-			if idx := strings.Index(line, "="); idx > 0 {
-				key := strings.TrimSpace(line[:idx])
-				value := strings.TrimSpace(line[idx+1:])
-				value = strings.TrimSuffix(value, ";")
-				currentSection.Set(key, value)
-			}
+	report := opts.OnDiagnostic
+	opts.OnDiagnostic = func(d Diagnostic) {
+		doc.diags = append(doc.diags, d)
+		if report != nil {
+			report(d)
 		}
 	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan error: %w", err)
+	p, err := newParser(r, opts)
+	if err != nil {
+		return nil, err
 	}
-
+	els, err := p.all()
+	if err != nil {
+		return nil, err
+	}
+	sortDiagnostics(doc.diags)
+	doc.root.fill(els)
 	return doc, nil
 }
 
-// ParseFile parses a TDF file
+func (s *Section) fill(els []*element) {
+	for _, el := range els {
+		if el.section {
+			child := newSection(el.key)
+			child.fill(el.children)
+			s.items = append(s.items, item{section: child})
+			continue
+		}
+		s.Set(el.key, el.value)
+	}
+}
+
+// ParseFile parses a TDF file.
 func ParseFile(path string) (*Document, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -194,188 +110,207 @@ func ParseFile(path string) (*Document, error) {
 	return Parse(file)
 }
 
-// ParseString parses TDF content from a string
+// ParseString parses TDF content from a string.
 func ParseString(content string) (*Document, error) {
 	return Parse(strings.NewReader(content))
 }
 
-// Section returns a section by name (case-insensitive)
+// Diagnostics returns what Parse found in the text, in offset order:
+// conditions the game refuses (and Parse repaired) and ones it accepts that
+// are probably mistakes.
+func (d *Document) Diagnostics() []Diagnostic {
+	return d.diags
+}
+
+// Root returns the document's top level as a Section: fields written outside
+// any [section], and the top-level sections. Its name is empty.
+func (d *Document) Root() *Section {
+	return d.root
+}
+
+// Fields returns the fields written outside any section, in order.
+func (d *Document) Fields() []*Field {
+	return d.root.Fields()
+}
+
+// Section returns the first top-level section with this name (ignoring ASCII
+// case), or nil.
 func (d *Document) Section(name string) *Section {
-	name = strings.ToUpper(name)
-	return d.sections[name]
+	return d.root.Section(name)
 }
 
-// Sections returns all sections
+// Sections returns every top-level section in order, including sections that
+// share a name.
 func (d *Document) Sections() []*Section {
-	return d.rootSections
+	return d.root.Sections()
 }
 
-// AddSection adds a new section or returns existing one
+// AddSection returns the first top-level section with this name, adding an
+// empty one at the end when there is none.
 func (d *Document) AddSection(name string) *Section {
-	upperName := strings.ToUpper(name)
-
-	if section, exists := d.sections[upperName]; exists {
-		return section
-	}
-
-	section := &Section{
-		name:   name, // Preserve original case
-		fields: make(map[string]*Field),
-		order:  make([]string, 0),
-	}
-
-	d.sections[upperName] = section
-	d.order = append(d.order, upperName)
-
-	return section
+	return d.root.AddSection(name)
 }
 
-// HasSection checks if a section exists
+// HasSection reports whether a top-level section with this name exists.
 func (d *Document) HasSection(name string) bool {
-	_, exists := d.sections[strings.ToUpper(name)]
-	return exists
+	return d.root.Section(name) != nil
 }
 
-// Write writes the document to a writer
+// Write writes the document as TDF text: top-level fields and sections in
+// order, sections in the retail layout ("[NAME]", then the braces and fields
+// indented one tab). Comments and the original spacing are not kept.
 func (d *Document) Write(w io.Writer) error {
-	for _, sectionName := range d.order {
-		section := d.sections[sectionName]
-
-		// Write section header
-		if _, err := fmt.Fprintf(w, "[%s]\n", section.name); err != nil {
-			return err
-		}
-
-		// Write opening brace with indentation
-		if _, err := fmt.Fprintf(w, "\t{\n"); err != nil {
-			return err
-		}
-
-		// Write fields
-		for _, fieldKey := range section.order {
-			field := section.fields[fieldKey]
-			if _, err := fmt.Fprintf(w, "\t%s=%s;\n", field.key, field.value); err != nil {
-				return err
-			}
-		}
-
-		// Write closing brace
-		if _, err := fmt.Fprintf(w, "\t}\n"); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	e := &errWriter{w: &ioTokenWriter{w: w}}
+	d.root.writeItems(e, 0, "\n")
+	return e.err
 }
 
-// WriteFile writes the document to a file
+// writeItems writes a section's items, each line ended by nl; depth is the
+// indentation of its fields.
+func (s *Section) writeItems(e *errWriter, depth int, nl string) {
+	pad := strings.Repeat("\t", depth)
+	for _, it := range s.items {
+		if f := it.field; f != nil {
+			e.str(pad)
+			e.str(f.key)
+			e.ch('=')
+			e.str(f.value)
+			e.ch(';')
+			e.str(nl)
+			continue
+		}
+		c := it.section
+		e.str(pad)
+		e.ch('[')
+		e.str(c.name)
+		e.ch(']')
+		e.str(nl)
+		e.str(pad)
+		e.str("\t{")
+		e.str(nl)
+		c.writeItems(e, depth+1, nl)
+		e.str(pad)
+		e.str("\t}")
+		e.str(nl)
+	}
+}
+
+// ioTokenWriter adapts an io.Writer to tokenWriter.
+type ioTokenWriter struct{ w io.Writer }
+
+func (t *ioTokenWriter) WriteString(s string) (int, error) { return io.WriteString(t.w, s) }
+func (t *ioTokenWriter) WriteByte(c byte) error {
+	_, err := t.w.Write([]byte{c})
+	return err
+}
+
+// WriteFile writes the document to a file.
 func (d *Document) WriteFile(path string) error {
 	file, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = file.Close() }()
-
-	return d.Write(file)
+	if err := d.Write(file); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
-// String returns the TDF content as a string
+// String returns the TDF content as a string.
 func (d *Document) String() string {
 	var sb strings.Builder
-	_ = d.Write(&sb)
+	if err := d.Write(&sb); err != nil {
+		return ""
+	}
 	return sb.String()
 }
 
-// Name returns the section name
+// Name returns the section name ("" for a document's top level).
 func (s *Section) Name() string {
 	return s.name
 }
 
-// Get returns a field value by key (case-insensitive)
+// Get returns a field value by key (ignoring ASCII case), and whether the key
+// is present. A key assigned more than once gives its last value.
 func (s *Section) Get(key string) (string, bool) {
-	key = strings.ToUpper(key)
-	if field, exists := s.fields[key]; exists {
+	if field, exists := s.index[foldKey(key)]; exists {
 		return field.value, true
 	}
 	return "", false
 }
 
-// Set sets a field value
+// Set sets a field value. An existing field (matched ignoring ASCII case)
+// keeps its key spelling and position; a new one is added after the section's
+// other items.
 func (s *Section) Set(key, value string) {
-	upperKey := strings.ToUpper(key)
-
-	if field, exists := s.fields[upperKey]; exists {
+	if field, exists := s.index[foldKey(key)]; exists {
 		field.value = value
 		return
 	}
-
-	field := &Field{
-		key:   key, // Preserve original case
-		value: value,
-	}
-
-	s.fields[upperKey] = field
-	s.order = append(s.order, upperKey)
+	field := &Field{key: key, value: value}
+	s.index[foldKey(key)] = field
+	s.items = append(s.items, item{field: field})
 }
 
-// Has checks if a field exists
+// Delete removes a field (matched ignoring ASCII case) and reports whether it
+// was present.
+func (s *Section) Delete(key string) bool {
+	u := foldKey(key)
+	f, ok := s.index[u]
+	if !ok {
+		return false
+	}
+	delete(s.index, u)
+	for i, it := range s.items {
+		if it.field == f {
+			s.items = append(s.items[:i], s.items[i+1:]...)
+			break
+		}
+	}
+	return true
+}
+
+// Has checks if a field exists.
 func (s *Section) Has(key string) bool {
-	_, exists := s.fields[strings.ToUpper(key)]
+	_, exists := s.index[foldKey(key)]
 	return exists
 }
 
-// String returns a string value (empty string if not found)
+// String returns a string value (empty string if not found).
 func (s *Section) String(key string) string {
 	value, _ := s.Get(key)
 	return value
 }
 
-// Int returns an integer value (0 if not found or invalid)
+// Int returns an integer value read the way the game reads it (see Atol): the
+// leading digits after an optional sign, wrapped to 32 bits, so "12abc" is 12
+// and "1.9" is 1. A missing key gives 0.
 func (s *Section) Int(key string) int {
-	value, ok := s.Get(key)
-	if !ok {
-		return 0
-	}
-
-	i, err := strconv.Atoi(value)
-	if err != nil {
-		return 0
-	}
-
-	return i
+	value, _ := s.Get(key)
+	return int(Atol(value))
 }
 
-// Float returns a float value (0.0 if not found or invalid)
+// Float returns a floating-point value read the way the game reads it (see
+// Atof), so "13O" is 13 and "1.5d2" is 150. A missing key gives 0.
 func (s *Section) Float(key string) float64 {
-	value, ok := s.Get(key)
-	if !ok {
-		return 0.0
-	}
-
-	f, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		return 0.0
-	}
-
-	return f
+	value, _ := s.Get(key)
+	return Atof(value)
 }
 
-// Bool returns a boolean value (false if not found)
-// Accepts: 1/0, true/false, yes/no (case-insensitive)
+// Fixed returns a value as the game's 16.16 fixed point (see Fixed). A missing
+// key gives 0.
+func (s *Section) Fixed(key string) int32 {
+	value, _ := s.Get(key)
+	return Fixed(value)
+}
+
+// Bool returns a flag read the way the game reads it (see Flag): bit 0 of the
+// integer value, so "1" and "3" are true while "0", "2", "true" and "yes" are
+// false. A missing key gives false.
 func (s *Section) Bool(key string) bool {
-	value, ok := s.Get(key)
-	if !ok {
-		return false
-	}
-
-	value = strings.ToLower(strings.TrimSpace(value))
-
-	switch value {
-	case "1", "true", "yes":
-		return true
-	default:
-		return false
-	}
+	value, _ := s.Get(key)
+	return Flag(value)
 }
 
 // List returns a value split by spaces (for category lists, etc.)
@@ -384,10 +319,7 @@ func (s *Section) List(key string) []string {
 	if !ok {
 		return nil
 	}
-
-	// Split by spaces and filter empty strings
-	parts := strings.Fields(value)
-	return parts
+	return strings.Fields(value)
 }
 
 // SetString sets a string value
@@ -419,16 +351,47 @@ func (s *Section) SetList(key string, values []string) {
 	s.Set(key, strings.Join(values, " "))
 }
 
-// Fields returns all fields in order
+// Fields returns the section's fields in order, one per key.
 func (s *Section) Fields() []*Field {
-	fields := make([]*Field, 0, len(s.order))
-	for _, key := range s.order {
-		fields = append(fields, s.fields[key])
+	fields := make([]*Field, 0, len(s.index))
+	for _, it := range s.items {
+		if it.field != nil {
+			fields = append(fields, it.field)
+		}
 	}
 	return fields
 }
 
-// Sections returns nested subsections
+// Sections returns the nested sections in order, including sections that
+// share a name.
 func (s *Section) Sections() []*Section {
-	return s.sections
+	var out []*Section
+	for _, it := range s.items {
+		if it.section != nil {
+			out = append(out, it.section)
+		}
+	}
+	return out
+}
+
+// Section returns the first nested section with this name (ignoring ASCII
+// case), or nil.
+func (s *Section) Section(name string) *Section {
+	for _, it := range s.items {
+		if it.section != nil && equalFold(it.section.name, name) {
+			return it.section
+		}
+	}
+	return nil
+}
+
+// AddSection returns the first nested section with this name, adding an empty
+// one after the section's other items when there is none.
+func (s *Section) AddSection(name string) *Section {
+	if c := s.Section(name); c != nil {
+		return c
+	}
+	c := newSection(name)
+	s.items = append(s.items, item{section: c})
+	return c
 }
