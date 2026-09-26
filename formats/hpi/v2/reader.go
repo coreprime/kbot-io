@@ -15,6 +15,10 @@ import (
 	"github.com/coreprime/kbot-io/formats/hpi/common"
 )
 
+// MaxEntrySize is the largest decoded file the reader accepts. It stops a
+// forged directory record from forcing a multi-gigabyte allocation.
+const MaxEntrySize = 1 << 30
+
 // v2-specific structure sizes (each field is a 32-bit little-endian int).
 const (
 	headerV2Size = 24 // DirectoryBlock, DirectorySize, NameBlock, NameSize, Data, Last78
@@ -179,7 +183,8 @@ func (r *Reader) readDirectory() error {
 		return fmt.Errorf("read name block: %w", err)
 	}
 
-	children, err := parseDirChildren(dirBuf, nameBuf, 0)
+	p := &dirParser{dir: dirBuf, names: nameBuf, visited: make(map[int]bool)}
+	children, err := p.children(0, 0)
 	if err != nil {
 		return err
 	}
@@ -190,21 +195,43 @@ func (r *Reader) readDirectory() error {
 	return nil
 }
 
-// parseDirChildren parses a directory record at dirOffset and returns its
-// subdirectory and file children.
-func parseDirChildren(dir, names []byte, dirOffset int) ([]*common.Entry, error) {
+// dirParser walks the directory block. Every directory record may be
+// reached once: a record reached again (a cycle or a shared node) and nesting
+// deeper than common.MaxDirectoryDepth are refused.
+type dirParser struct {
+	dir, names []byte
+	visited    map[int]bool
+}
+
+// children parses a directory record at dirOffset and returns its
+// subdirectory and file children. A negative count is an empty list.
+func (p *dirParser) children(dirOffset, depth int) ([]*common.Entry, error) {
+	if depth > common.MaxDirectoryDepth {
+		return nil, fmt.Errorf("v2 directory nesting exceeds %d levels", common.MaxDirectoryDepth)
+	}
+	dir := p.dir
 	if dirOffset < 0 || dirOffset+dirV2Size > len(dir) {
 		return nil, fmt.Errorf("v2 directory offset %d out of range (len=%d)", dirOffset, len(dir))
 	}
+	if p.visited[dirOffset] {
+		return nil, fmt.Errorf("v2 directory record at offset %d is reached twice (cycle or shared node)", dirOffset)
+	}
+	p.visited[dirOffset] = true
 	firstSubDir := int32(binary.LittleEndian.Uint32(dir[dirOffset+4:]))
 	subCount := int32(binary.LittleEndian.Uint32(dir[dirOffset+8:]))
 	firstFile := int32(binary.LittleEndian.Uint32(dir[dirOffset+12:]))
 	fileCount := int32(binary.LittleEndian.Uint32(dir[dirOffset+16:]))
+	if subCount > 0 && int64(subCount)*dirV2Size > int64(len(dir)) {
+		return nil, fmt.Errorf("v2 directory at %d claims %d subdirectories", dirOffset, subCount)
+	}
+	if fileCount > 0 && int64(fileCount)*entryV2Size > int64(len(dir)) {
+		return nil, fmt.Errorf("v2 directory at %d claims %d files", dirOffset, fileCount)
+	}
 
 	var children []*common.Entry
 	for i := int32(0); i < subCount; i++ {
 		off := int(firstSubDir) + int(i)*dirV2Size
-		entry, err := parseDir(dir, names, off)
+		entry, err := p.parseDir(off, depth+1)
 		if err != nil {
 			return nil, err
 		}
@@ -212,7 +239,7 @@ func parseDirChildren(dir, names []byte, dirOffset int) ([]*common.Entry, error)
 	}
 	for i := int32(0); i < fileCount; i++ {
 		off := int(firstFile) + int(i)*entryV2Size
-		entry, err := parseFile(dir, names, off)
+		entry, err := parseFile(dir, p.names, off)
 		if err != nil {
 			return nil, err
 		}
@@ -221,17 +248,17 @@ func parseDirChildren(dir, names []byte, dirOffset int) ([]*common.Entry, error)
 	return children, nil
 }
 
-func parseDir(dir, names []byte, off int) (*common.Entry, error) {
-	if off < 0 || off+dirV2Size > len(dir) {
-		return nil, fmt.Errorf("v2 subdir offset %d out of range (len=%d)", off, len(dir))
+func (p *dirParser) parseDir(off, depth int) (*common.Entry, error) {
+	if off < 0 || off+dirV2Size > len(p.dir) {
+		return nil, fmt.Errorf("v2 subdir offset %d out of range (len=%d)", off, len(p.dir))
 	}
-	namePtr := int32(binary.LittleEndian.Uint32(dir[off:]))
-	name, err := readName(names, int(namePtr))
+	namePtr := int32(binary.LittleEndian.Uint32(p.dir[off:]))
+	name, err := readName(p.names, int(namePtr))
 	if err != nil {
 		return nil, fmt.Errorf("read subdir name: %w", err)
 	}
 	entry := &common.Entry{Name: name, IsDir: true}
-	kids, err := parseDirChildren(dir, names, off)
+	kids, err := p.children(off, depth)
 	if err != nil {
 		return nil, err
 	}
@@ -307,6 +334,9 @@ func (r *Reader) extractFile(entry *common.Entry) ([]byte, error) {
 	if _, err := r.file.Seek(int64(entry.Offset), io.SeekStart); err != nil {
 		return nil, err
 	}
+	if int64(entry.Size) > MaxEntrySize {
+		return nil, fmt.Errorf("%s: size %d exceeds the %d-byte entry limit", entry.Name, entry.Size, int64(MaxEntrySize))
+	}
 	if entry.CompressedSize == 0 {
 		// Uncompressed payload read straight from disk; its length cannot exceed
 		// the file itself.
@@ -326,5 +356,12 @@ func (r *Reader) extractFile(entry *common.Entry) ([]byte, error) {
 	if _, err := io.ReadFull(r.file, chunk); err != nil {
 		return nil, err
 	}
-	return common.DecodeChunk(chunk)
+	data, err := common.DecodeChunk(chunk)
+	if err != nil {
+		return nil, err
+	}
+	if uint32(len(data)) != entry.Size {
+		return nil, fmt.Errorf("%s: decoded %d bytes, directory says %d", entry.Name, len(data), entry.Size)
+	}
+	return data, nil
 }

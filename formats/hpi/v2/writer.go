@@ -25,6 +25,8 @@ type WriterEntry struct {
 // Writer builds a TA: Kingdoms (v2) HPI archive. Unlike v1 there is no XOR
 // cipher; each file is stored either raw or as a single zlib-compressed SQSH
 // chunk, and the directory and name blocks are written uncompressed.
+// Directories are merged ignoring ASCII letter case, keeping the first
+// spelling added.
 type Writer struct {
 	file              *os.File
 	entries           []WriterEntry
@@ -54,10 +56,16 @@ func (w *Writer) AddFile(archivePath, filePath string) error {
 	return w.AddFileFromBytes(archivePath, data)
 }
 
-// AddFileFromBytes adds a file from an in-memory byte slice.
+// AddFileFromBytes adds a file from an in-memory byte slice. The path must
+// pass common.CleanArchivePath: '/' or '\' separators, no empty, "." or ".."
+// segments and no name longer than common.MaxNameLength bytes.
 func (w *Writer) AddFileFromBytes(archivePath string, data []byte) error {
+	p, err := common.CleanArchivePath(archivePath)
+	if err != nil {
+		return err
+	}
 	w.entries = append(w.entries, WriterEntry{
-		Path: filepath.ToSlash(archivePath),
+		Path: p,
 		Data: append([]byte(nil), data...),
 	})
 	return nil
@@ -119,9 +127,11 @@ type fileNode struct {
 	compSize   uint32 // includes the 19-byte SQSH header; 0 when stored raw
 }
 
+// findOrCreateChild returns the subdirectory whose name equals name ignoring
+// ASCII letter case, creating it with this spelling if none exists.
 func (d *dirNode) findOrCreateChild(name string) *dirNode {
 	for _, c := range d.subdirs {
-		if c.name == name {
+		if common.EqualFoldASCII(c.name, name) {
 			return c
 		}
 	}
