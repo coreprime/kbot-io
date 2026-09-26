@@ -171,10 +171,12 @@ func ParseFrameStorage(s string) (FrameStorage, error) {
 
 // StorageForPath returns the storage the game expects for the frames of the
 // GAF at path (a VFS path; separators and case do not matter). The game reads
-// unit textures (textures/*.gaf) and the sight masks (anims/vismasks.gaf) as
-// plain pixel arrays, so their frames must be raw; for those it returns
+// unit textures (textures/*.gaf) and the sight masks (vismasks.gaf, in anims)
+// as plain pixel arrays, so their frames must be raw; for those it returns
 // StorageRaw. For any other path it returns StorageDefault. Every stock
-// texture frame is raw.
+// frame in those files is raw. The similarly named anims/vismask.gaf is an
+// ordinary animation archive whose stock frames are compressed, so it gets
+// StorageDefault.
 func StorageForPath(path string) FrameStorage {
 	p := strings.ToLower(strings.ReplaceAll(path, "\\", "/"))
 	base := p
@@ -184,7 +186,7 @@ func StorageForPath(path string) FrameStorage {
 	if strings.HasPrefix(p, "textures/") || strings.Contains(p, "/textures/") {
 		return StorageRaw
 	}
-	if strings.HasPrefix(base, "vismask") {
+	if base == "vismasks.gaf" {
 		return StorageRaw
 	}
 	return StorageDefault

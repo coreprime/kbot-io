@@ -135,7 +135,9 @@ func TestStorageForPath(t *testing.T) {
 		"textures/ARMVEHIC.GAF":     StorageRaw,
 		`C:\mods\Textures\x.gaf`:    StorageRaw,
 		"anims/vismasks.gaf":        StorageRaw,
-		"ANIMS/VISMASK.GAF":         StorageRaw,
+		"ANIMS/VISMASKS.GAF":        StorageRaw,
+		`anims\VisMasks.gaf`:        StorageRaw,
+		"anims/vismask.gaf":         StorageDefault,
 		"anims/armacv1.gaf":         StorageDefault,
 		"anims/texturesample.gaf":   StorageDefault,
 		"fx.gaf":                    StorageDefault,
@@ -143,7 +145,7 @@ func TestStorageForPath(t *testing.T) {
 		"mytextures/notreally.gaf":  StorageDefault,
 		"textures":                  StorageDefault,
 		"":                          StorageDefault,
-		"anims/vismasks_backup.gaf": StorageRaw,
+		"anims/vismasks_backup.gaf": StorageDefault,
 	} {
 		if got := StorageForPath(path); got != want {
 			t.Errorf("StorageForPath(%q) = %v, want %v", path, got, want)
@@ -283,6 +285,40 @@ func TestWriteRejectsWhatCannotBeStored(t *testing.T) {
 	}
 	if err := WriteGAFWith(io.Discard, []*Sequence{{Frames: []*Frame{wide}}}, WriteOptions{DefaultStorage: StorageRaw}); err != nil {
 		t.Errorf("a 65535-pixel raw row: %v", err)
+	}
+}
+
+// StorageForPath asks for raw frames exactly where the stock files store
+// them: every frame of a texture archive and of vismasks.gaf is raw, while
+// the similarly named vismask.gaf is compressed.
+func TestStorageForPathMatchesStockFiles(t *testing.T) {
+	for _, rel := range [][]string{{"textures", "armvehic.gaf"}, {"anims", "vismasks.gaf"}, {"anims", "vismask.gaf"}} {
+		path := testutil.UnpackedFile(t, rel...)
+		r, err := LoadFromFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seqs, err := r.ReadSequences()
+		_ = r.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := StorageForPath(strings.Join(rel, "/"))
+		frames := 0
+		for _, s := range seqs {
+			for i, f := range s.Frames {
+				frames++
+				if want == StorageRaw && f.Storage != StorageRaw {
+					t.Errorf("%s %s frame %d is %v, but StorageForPath says raw", path, s.Name, i, f.Storage)
+				}
+				if want != StorageRaw && f.Storage != StorageCompressed {
+					t.Errorf("%s %s frame %d is %v, want compressed", path, s.Name, i, f.Storage)
+				}
+			}
+		}
+		if frames == 0 {
+			t.Errorf("%s has no frames", path)
+		}
 	}
 }
 
