@@ -219,19 +219,39 @@ type ParseOptions struct {
 }
 
 // IsAIFile reports whether content looks like an AI profile: some line's
-// first word is plan, weight or limit (case-insensitive) and is followed by
-// another word.
+// first word is a directive (case-insensitive) written the usual way: a plan
+// line naming easy, medium, hard or any, or a weight or limit line whose value
+// starts with a number.
 func IsAIFile(content []byte) bool {
 	found := false
 	forEachLine(content, func(_ int, line []byte) bool {
 		words, _ := tokenize(line)
-		if len(words) >= 2 && directive(words[0]) != "" {
+		if len(words) >= 2 && looksLikeDirective(words) {
 			found = true
 			return false
 		}
 		return true
 	})
 	return found
+}
+
+func looksLikeDirective(words []string) bool {
+	switch directive(words[0]) {
+	case "plan":
+		for _, w := range words[1:] {
+			switch asciiLower(w) {
+			case "easy", "medium", "hard", "any":
+				return true
+			}
+		}
+	case "weight":
+		_, n := parseWeight(word(words, 2))
+		return n > 0
+	case "limit":
+		_, n := parseLimit(word(words, 2))
+		return n > 0
+	}
+	return false
 }
 
 // Parse parses a profile with the default options. It does not fail: lines

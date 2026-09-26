@@ -62,7 +62,9 @@ func TestIsAIFileUsesFirstWord(t *testing.T) {
 		{"  Weight ARM 0.2\r\n", true},
 		{"// header\nplan easy\n", true},
 		{"The weight of a unit sets its speed.\nThere is no limit here.", false},
+		{"Limit your units to 5.\nWeight: heavy", false},
 		{"plan\n", false},
+		{"plan to win\n", false},
 		{"#weight ARM 0.2", false},
 	}
 	for _, c := range cases {
