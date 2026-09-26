@@ -74,13 +74,6 @@ func TestCompileBitwiseOperatorsUseTheGameOpcodes(t *testing.T) {
 	)
 }
 
-func TestCompileRejectsModulo(t *testing.T) {
-	err := compileError(t, "", "\tvar x;\n\tx = 10 % 4;")
-	if err == nil || !strings.Contains(err.Error(), "modulo") {
-		t.Fatalf("err = %v, want a modulo error", err)
-	}
-}
-
 func TestCompileRejectsUnknownIdentifiers(t *testing.T) {
 	for _, body := range []string{
 		"\tvar x;\n\tx = nosuchthing;",
@@ -374,5 +367,28 @@ Helper(a, b)
 		if report := scripting.AnalyzeStack(insts, false); len(report.Issues) != 0 {
 			t.Errorf("%s: %+v", cob.ScriptNames[i], report.Issues)
 		}
+	}
+}
+
+func TestCompileModuloOnlyUnderVersion6(t *testing.T) {
+	err := compileError(t, "", "\tvar x;\n\tx = 7 % 3;")
+	if err == nil || !strings.Contains(err.Error(), "modulo") {
+		t.Fatalf("TA script: err = %v, want a modulo error", err)
+	}
+
+	// TA: Kingdoms keeps the old encoding, 0x10037000, and a warning.
+	c := NewCompiler(".version 6\nCreate()\n{\n\tvar x;\n\tx = 7 % 3;\n\tx = x % 2;\n}\n")
+	cob, err := c.Compile()
+	if err != nil {
+		t.Fatalf(".version 6: %v", err)
+	}
+	equalWords(t, codeWords(cob),
+		alloc,
+		push, 7, push, 3, 0x10037000, popLoc, 0,
+		local, 0, push, 2, 0x10037000, popLoc, 0,
+		alloc, scripting.OP_RETURN,
+	)
+	if w := c.Warnings(); len(w) != 1 || !strings.Contains(w[0], "TA: Kingdoms") {
+		t.Errorf("warnings = %q, want one about TA: Kingdoms", w)
 	}
 }

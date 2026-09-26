@@ -24,8 +24,12 @@ import (
 //	*  /
 //
 // with the prefix operators !, NOT, ~ (bitwise NOT) and unary minus binding
-// tightest. All binary operators are left-associative. `%` is rejected: the
-// game has no modulo instruction.
+// tightest. All binary operators are left-associative.
+//
+// `%` is an error in TA (version 4) scripts: TA has no modulo instruction,
+// and the word earlier versions emitted for it, 0x10037000, is TA's bitwise
+// XOR. Under `.version 6` `%` still compiles to 0x10037000, with a warning,
+// because what TA: Kingdoms does with that instruction is not established.
 //
 // Operands are integer literals, <degrees> and [distance] literals, locals,
 // statics, piece names (their index), unit-value port names, TRUE/FALSE,
@@ -298,7 +302,7 @@ var binaryOps = map[string]binaryOp{
 	"-":   {9, scripting.OP_SUB},
 	"*":   {10, scripting.OP_MUL},
 	"/":   {10, scripting.OP_DIV},
-	"%":   {10, 0},
+	"%":   {10, scripting.OP_XOR}, // version 6 only; see parseExpr
 }
 
 func (p *exprParser) peekBinary() (string, binaryOp, bool) {
@@ -325,7 +329,9 @@ func (p *exprParser) parseExpr(minPrec int) error {
 		}
 		p.next()
 		if text == "%" {
-			return fmt.Errorf("the game has no modulo instruction; `%%` cannot be compiled")
+			if err := p.c.modulo(); err != nil {
+				return err
+			}
 		}
 		if err := p.parseExpr(op.prec + 1); err != nil {
 			return err
@@ -453,6 +459,28 @@ func (p *exprParser) parsePrimary() error {
 		return fmt.Errorf("unknown function %s()", t.text)
 	}
 	return p.c.emitIdentifier(t.text)
+}
+
+// modulo checks a `%` operator: an error in a TA script, and a warning
+// (once per function) under `.version 6`, where it compiles to 0x10037000.
+func (c *Compiler) modulo() error {
+	if !c.kingdoms() {
+		return fmt.Errorf("TA has no modulo instruction (0x10037000 is its bitwise XOR); "+
+			"`%%` compiles only after `.version %d`", kingdomsVersion)
+	}
+	name := ""
+	if c.currentScript != nil {
+		name = c.currentScript.Name
+	}
+	msg := fmt.Sprintf("function %s: `%%` compiles to 0x10037000, which TA runs as bitwise XOR; "+
+		"what TA: Kingdoms does with that instruction is not established", name)
+	for _, w := range c.warnings {
+		if w == msg {
+			return nil
+		}
+	}
+	c.warnings = append(c.warnings, msg)
+	return nil
 }
 
 var takMathOpcodes = map[string]uint32{

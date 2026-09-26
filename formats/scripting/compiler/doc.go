@@ -7,8 +7,12 @@
 //     and the unit-value port names (HEALTH, PIECE_XZ, ...) to their number;
 //   - `^` compiles to the bitwise XOR (0x10037000), `~` to the bitwise NOT
 //     (0x10038000), `&` to AND and the keyword XOR to the game's second XOR
-//     (0x10059000); AND, OR and NOT are the logical operators; `%` is an
-//     error because the game has no modulo instruction;
+//     (0x10059000); AND, OR and NOT are the logical operators;
+//   - `%` is an error in TA scripts: TA has no modulo instruction, and
+//     0x10037000, the word `%` used to compile to, is its bitwise XOR. Under
+//     `.version 6` `%` still compiles to 0x10037000 and Compiler.Warnings
+//     notes that what TA: Kingdoms does with that instruction is not
+//     established;
 //   - GET always pops a port and four arguments, so `get(port)`,
 //     `get PORT(a)` and the like push zeros for the missing arguments;
 //   - a function may have at most 32 parameters and locals, and the locals

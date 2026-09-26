@@ -49,14 +49,15 @@
 // Some published opcode tables mislabel the arithmetic group. The game
 // runs 0x10037000 as bitwise XOR (OP_XOR), 0x10038000 as the unary bitwise
 // NOT (OP_NOT) and 0x10059000 as a second bitwise XOR (OP_XOR_ALT); it has
-// no modulo instruction and does not run 0x1003A000. The names OP_MOD,
-// OP_BITWISE_XOR, OP_BITWISE_NOT and OP_LOGICAL_XOR keep their old values
-// for existing callers and are deprecated. The table also covers the
-// instructions without a BOS keyword: DISCARD_CALL (0x10063000, two inline
-// words, pops the count in the second), PIECE_OP_09 (0x10009000, one inline
-// piece, pops two), IS_CARRYING_UNIT (0x10044000) and CARRIER_UNIT_ID
-// (0x10045000). LookupOpcode gives every instruction's operand count and
-// stack effect.
+// no modulo instruction and does not run 0x1003A000. No retail TA:
+// Kingdoms script uses 0x10037000 or 0x10038000, and what TA: Kingdoms does
+// with them has not been established. The names OP_MOD, OP_BITWISE_XOR,
+// OP_BITWISE_NOT and OP_LOGICAL_XOR keep their old values for existing
+// callers and are deprecated. The table also covers the instructions
+// without a BOS keyword: DISCARD_CALL (0x10063000, two inline words, pops
+// the count in the second), PIECE_OP_09 (0x10009000, one inline piece, pops
+// two), IS_CARRYING_UNIT (0x10044000) and CARRIER_UNIT_ID (0x10045000).
+// LookupOpcode gives every instruction's operand count and stack effect.
 //
 // PLAY_SOUND, MISSION_COMMAND and the three TAK_MATH operators are TA:
 // Kingdoms extensions (OpcodeInfo.Kingdoms). TA 3.1c has no handler for

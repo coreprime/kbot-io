@@ -87,8 +87,9 @@ const (
 
 	// OP_MOD carries the value some published opcode tables give modulo.
 	//
-	// Deprecated: the game has no modulo instruction. It executes 0x10037000
-	// as bitwise XOR; use OP_XOR.
+	// Deprecated: TA has no modulo instruction. It executes 0x10037000 as
+	// bitwise XOR; use OP_XOR. What TA: Kingdoms does with 0x10037000 is
+	// not established.
 	OP_MOD = 0x10037000
 
 	// OP_BITWISE_XOR carries the value some published opcode tables give XOR.

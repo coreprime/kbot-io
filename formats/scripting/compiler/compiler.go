@@ -91,14 +91,17 @@ func (c *Compiler) Warnings() []string {
 //
 // The output is always code the game can run: the compiler rejects
 // constructs it cannot express correctly instead of emitting a placeholder.
-// Unknown identifiers, the `%` operator (the game has no modulo
-// instruction), functions with more than scripting.StackSlots local slots
-// and expressions that need more stack than that are errors. TA: Kingdoms
-// constructs (play-sound, Mission-Command, the __tak_math_* intrinsics and
-// `.sound_name`) are accepted only after `.version 6`. When a function name
-// is defined twice both definitions are compiled, calls bind to the first
-// (as the game's name lookup does), and Warnings reports the duplicate. A
-// function whose code does not end with RETURN gets `return 0` appended.
+// Unknown identifiers, functions with more than scripting.StackSlots local
+// slots and expressions that need more stack than that are errors. TA:
+// Kingdoms constructs (play-sound, Mission-Command, the __tak_math_*
+// intrinsics and `.sound_name`) are accepted only after `.version 6`. The
+// `%` operator is an error in TA scripts, which have no modulo instruction;
+// under `.version 6` it compiles to 0x10037000 as before and Warnings notes
+// that what TA: Kingdoms does with that instruction is not established.
+// When a function name is defined twice both definitions are compiled,
+// calls bind to the first (as the game's name lookup does), and Warnings
+// reports the duplicate. A function whose code does not end with RETURN
+// gets `return 0` appended.
 func (c *Compiler) Compile() (*scripting.COB, error) {
 	// Trailing // comments are dropped up front so that statements, braces
 	// and `else` are recognised whatever follows them on the line.
