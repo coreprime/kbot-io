@@ -1,6 +1,7 @@
 package tdf
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -16,9 +17,13 @@ import (
 // in a section is one Field holding the last value (the one the game uses),
 // spelled and placed as first written. Sections with the same name are all
 // kept, in order; Section returns the first, as the game's lookups do.
+//
+// A parsed Document can be written two ways: Write re-emits it in a normal
+// layout, while Bytes keeps the source text and applies only the changes.
 type Document struct {
 	root  *Section
 	diags []Diagnostic
+	src   []byte // source text for Bytes; nil for a NewDocument
 }
 
 // Section is a [name]{ ... } block of a Document, or the document's top level.
@@ -26,12 +31,26 @@ type Section struct {
 	name  string
 	items []item
 	index map[string]*Field // folded key -> field
+
+	// Source bookkeeping for Bytes. fromSrc is set for sections read by
+	// Parse; open is the offset just past its '{' (-1 when it had none, 0 for
+	// the top level); stop is where the top level stopped (the end of the
+	// text or a stray '}'); removed lists statements Delete took out.
+	fromSrc bool
+	open    int64
+	stop    int64
+	removed []span
 }
 
-// item is one entry of a section: a field or a child section.
+// span is a byte range of the source text.
+type span struct{ start, end int64 }
+
+// item is one entry of a section: a field or a child section. end is where
+// a section read by Parse ends in the source.
 type item struct {
 	field   *Field
 	section *Section
+	end     int64
 }
 
 // Field is a key=value pair of a section.
@@ -39,6 +58,16 @@ type Field struct {
 	key     string
 	value   string
 	invalid string // why value cannot be written, when set from a NaN
+
+	// src records where Parse read the field: every assignment's statement,
+	// the value text of the last one and that text. nil for a new field.
+	src *fieldSource
+}
+
+type fieldSource struct {
+	stmts []span
+	value span
+	orig  string
 }
 
 // Key returns the field key, spelled as first written.
@@ -68,6 +97,13 @@ func Parse(r io.Reader) (*Document, error) {
 
 // ParseWith reads TDF text from r with explicit parse options.
 func ParseWith(r io.Reader, opts ParseOptions) (*Document, error) {
+	if limit := opts.maxBytes(); limit > 0 {
+		r = io.LimitReader(r, limit+1)
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
 	doc := NewDocument()
 	report := opts.OnDiagnostic
 	opts.OnDiagnostic = func(d Diagnostic) {
@@ -76,7 +112,7 @@ func ParseWith(r io.Reader, opts ParseOptions) (*Document, error) {
 			report(d)
 		}
 	}
-	p, err := newParser(r, opts)
+	p, err := newParser(bytes.NewReader(data), opts)
 	if err != nil {
 		return nil, err
 	}
@@ -85,6 +121,8 @@ func ParseWith(r io.Reader, opts ParseOptions) (*Document, error) {
 		return nil, err
 	}
 	sortDiagnostics(doc.diags)
+	doc.src = data
+	doc.root.fromSrc, doc.root.stop = true, p.stopOff
 	doc.root.fill(els)
 	return doc, nil
 }
@@ -93,11 +131,19 @@ func (s *Section) fill(els []*element) {
 	for _, el := range els {
 		if el.section {
 			child := newSection(el.key)
+			child.fromSrc, child.open = true, el.vOff
 			child.fill(el.children)
-			s.items = append(s.items, item{section: child})
+			s.items = append(s.items, item{section: child, end: el.end})
 			continue
 		}
 		s.Set(el.key, el.value)
+		f := s.index[foldKey(el.key)]
+		if f.src == nil {
+			f.src = &fieldSource{}
+		}
+		f.src.stmts = append(f.src.stmts, span{el.off, el.end})
+		f.src.value = span{el.vOff, el.vEnd}
+		f.src.orig = el.value
 	}
 }
 
@@ -162,7 +208,8 @@ func (d *Document) HasSection(name string) bool {
 // order, sections in the retail layout ("[NAME]", then the braces and fields
 // indented one tab). It fails, before writing anything, on a key, value or
 // section name that would not read back unchanged (see CheckKey, CheckValue
-// and CheckName). Comments and the original spacing are not kept.
+// and CheckName). Comments and the original spacing are not kept; see Bytes
+// for a write that keeps them.
 func (d *Document) Write(w io.Writer) error {
 	if err := d.root.check(); err != nil {
 		return err
@@ -303,6 +350,9 @@ func (s *Section) Delete(key string) bool {
 			s.items = append(s.items[:i], s.items[i+1:]...)
 			break
 		}
+	}
+	if f.src != nil {
+		s.removed = append(s.removed, f.src.stmts...)
 	}
 	return true
 }

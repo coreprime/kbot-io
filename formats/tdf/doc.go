@@ -121,5 +121,6 @@
 // the comment-blanked text of weapon sections and of an OTA's [GlobalHeader])
 // to check that players share the same data, so such a rewrite changes those
 // hashes even when every value is the same: a rewritten unit set is a
-// different unit set to the game.
+// different unit set to the game. Document.Bytes instead keeps the source text
+// and changes only the values edited, so hashes change only when data does.
 package tdf

@@ -213,6 +213,9 @@ func TestDocumentWriteRefusesUnrepresentableText(t *testing.T) {
 		if b.Len() != 0 {
 			t.Error("Write must not write anything when it fails")
 		}
+		if _, err := doc.Bytes(); err == nil {
+			t.Error("Bytes accepted it too")
+		}
 	}
 	doc := NewDocument()
 	doc.AddSection("bad]name")
@@ -234,6 +237,96 @@ func TestDocumentDelete(t *testing.T) {
 	}
 	if fs := a.Fields(); len(fs) != 1 || fs[0].Key() != "y" {
 		t.Errorf("fields = %v", fs)
+	}
+}
+
+func TestDocumentBytesKeepsSourceText(t *testing.T) {
+	src := "// header comment\r\n[UNITINFO]\r\n\t{\r\n\tUnitName=ARMCOM;  // the commander\r\n" +
+		"\tBuildCostMetal = 2500 ;\r\n\tMaxDamage=3000;\r\n\t[SUB]{a=1;}\r\n\t}\r\n}trailing text the game ignores"
+	doc, err := ParseString(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	same, err := doc.Bytes()
+	if err != nil || string(same) != src {
+		t.Fatalf("unchanged document must give the source back: %v\n%q", err, same)
+	}
+
+	u := doc.Section("UNITINFO")
+	u.SetInt("BuildCostMetal", 3000)  // changed: only the value text changes
+	u.SetString("UnitName", "ARMCOM") // unchanged value: no edit
+	u.Delete("MaxDamage")
+	u.SetInt("Newkey", 5)
+	u.Section("SUB").SetInt("b", 2)
+	doc.AddSection("EXTRA").SetString("x", "y")
+	got, err := doc.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "// header comment\r\n[UNITINFO]\r\n\t{\r\n\tUnitName=ARMCOM;  // the commander\r\n" +
+		"\tBuildCostMetal = 3000 ;\r\n\t[SUB]{a=1;\r\n\t\tb=2;}\r\n\tNewkey=5;\r\n\t}\r\n" +
+		"[EXTRA]\r\n\t{\r\n\tx=y;\r\n\t}\r\n}trailing text the game ignores"
+	if string(got) != want {
+		t.Errorf("Bytes:\n%q\nwant:\n%q", got, want)
+	}
+	back, err := ParseString(string(got))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Section("UNITINFO").Int("BuildCostMetal") != 3000 || back.Section("UNITINFO").Has("MaxDamage") ||
+		back.Section("UNITINFO").Section("SUB").Int("b") != 2 || back.Section("EXTRA").String("x") != "y" {
+		t.Errorf("edited text reads back wrong:\n%s", got)
+	}
+}
+
+func TestDocumentBytesEditsTheLastAssignment(t *testing.T) {
+	doc, _ := ParseString("[A]{x=1;\nx=2;\n}")
+	doc.Section("A").SetInt("x", 9)
+	got, _ := doc.Bytes()
+	if string(got) != "[A]{x=1;\nx=9;\n}" {
+		t.Errorf("Bytes = %q", got)
+	}
+	doc.Section("A").Delete("x")
+	got, _ = doc.Bytes()
+	if string(got) != "[A]{\n}" {
+		t.Errorf("Delete removes every assignment: %q", got)
+	}
+}
+
+func TestDocumentBytesIntoEmptySections(t *testing.T) {
+	doc, _ := ParseString("[A]\n{\n}\n")
+	doc.Section("A").SetInt("x", 1)
+	got, _ := doc.Bytes()
+	if string(got) != "[A]\n{\n\tx=1;\n}\n" {
+		t.Errorf("Bytes = %q", got)
+	}
+
+	doc, _ = ParseString("[A]{x=1;}")
+	doc.Section("A").Delete("x")
+	doc.Section("A").SetInt("y", 2)
+	got, _ = doc.Bytes()
+	if string(got) != "[A]{\n\ty=2;}" {
+		t.Errorf("Bytes = %q", got)
+	}
+
+	doc, _ = ParseString("// only a comment\n")
+	doc.AddSection("A").SetInt("x", 1)
+	got, _ = doc.Bytes()
+	if string(got) != "// only a comment\n[A]\n\t{\n\tx=1;\n\t}\n" {
+		t.Errorf("Bytes = %q", got)
+	}
+
+	doc, _ = ParseString("[A] x=1;")
+	doc.Section("A").SetInt("y", 1)
+	if _, err := doc.Bytes(); err == nil {
+		t.Error("adding to a section with no braces should fail")
+	}
+
+	fresh := NewDocument()
+	fresh.AddSection("A").SetInt("x", 1)
+	got, _ = fresh.Bytes()
+	if string(got) != fresh.String() {
+		t.Errorf("a new document's Bytes should match Write: %q", got)
 	}
 }
 
