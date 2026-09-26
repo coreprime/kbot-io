@@ -8,7 +8,12 @@ import (
 	"os"
 )
 
-// Palette represents a TA color palette
+// Palette represents a TA color palette.
+//
+// The palettes this package loads are fully opaque: the game draws palette
+// index 0 as black like any other colour. Which index renders transparent is
+// decided per frame at render time (see RenderOptions), and the renderers
+// treat every other entry as opaque whatever alpha a caller's palette holds.
 type Palette struct {
 	Colors [256]color.RGBA
 }
@@ -44,9 +49,6 @@ func ReadPalette(r io.Reader) (*Palette, error) {
 		}
 	}
 
-	// Color 0 is always transparent
-	p.Colors[0].A = 0
-
 	return p, nil
 }
 
@@ -59,11 +61,11 @@ func (p *Palette) ColorModel() color.Palette {
 	return palette
 }
 
-// FallbackPalette returns a greyscale palette for when no real palette is available.
+// FallbackPalette returns an opaque greyscale palette (index i is grey level
+// i) for when no real palette is available.
 func FallbackPalette() *Palette {
 	p := &Palette{}
-	p.Colors[0] = color.RGBA{0, 0, 0, 0}
-	for i := 1; i < 256; i++ {
+	for i := 0; i < 256; i++ {
 		v := uint8(i)
 		p.Colors[i] = color.RGBA{v, v, v, 255}
 	}
@@ -86,9 +88,6 @@ func LoadPaletteFromBytes(data []byte) (*Palette, error) {
 			A: 255, // TA palettes don't use alpha, always opaque
 		}
 	}
-
-	// Make color 0 transparent
-	p.Colors[0].A = 0
 
 	return p, nil
 }

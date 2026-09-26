@@ -80,4 +80,20 @@
 // sequence or 255 layers in a frame, layers with layers of their own, names
 // over 32 bytes, durations over 65535 ticks, pixel buffers of the wrong size
 // and compressed rows over 65535 bytes.
+//
+// # Rendering and transparency
+//
+// The exporters (ToImage, ToPNG, ToGIF, ToAPNG and their ...With forms)
+// produce indexed images whose pixels keep their palette index. Every
+// palette entry is opaque, palette index 0 (black) included, except one
+// transparent slot chosen per export. The zero RenderOptions applies the
+// game's rule (the stored key for raw frames, the skipped pixels for
+// compressed and composite frames); TransparencyModeNone makes every pixel
+// opaque, TransparencyModeIndex makes one chosen index transparent, and
+// TransparencyModeHeuristic guesses a key from the corner pixels of raw
+// frames, which suits TA: Kingdoms atlases and is what
+// VariantTAK.DefaultRenderOptions returns. Normally the slot is the frame's
+// key; when a frame draws key-valued pixels, or frames of one animation use
+// each other's keys as colours, an index no drawn pixel uses becomes the
+// slot instead. Layers with the +11 flag are exported as ordinary pixels.
 package gaf

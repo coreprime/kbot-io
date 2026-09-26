@@ -8,171 +8,247 @@ import (
 	"io"
 )
 
+// maxCanvasPixels caps the canvas of an animated export. Frame origins are
+// signed 16-bit values, so frames placed far apart could otherwise ask for a
+// canvas of billions of pixels.
+const maxCanvasPixels = maxFramePixels
+
+// exportPalette is the palette shared by the images of one export: the
+// caller's colours made opaque, with at most one entry (slot) transparent.
+type exportPalette struct {
+	rgb     color.Palette // opaque colours, for PNG PLTE chunks
+	colors  color.Palette // rgb with colors[slot] transparent when hasSlot
+	slot    uint8
+	hasSlot bool
+}
+
+// newExportPalette picks the transparent slot for frames rendered under
+// rules. The slot is a palette index that no opaque pixel of any frame uses,
+// preferring a frame's own key, so that opaque key-valued pixels of
+// compressed frames and frames with different keys all render correctly.
+// background asks for a slot even when no rule applies transparency (for
+// canvas area no frame covers). When every index is used by opaque pixels,
+// the first applied key becomes the slot and pixels of that value render
+// transparent.
+func newExportPalette(palette *Palette, frames []*Frame, rules []keyRule, background bool) exportPalette {
+	if palette == nil {
+		palette = FallbackPalette()
+	}
+	ep := exportPalette{rgb: make(color.Palette, len(palette.Colors))}
+	for i, c := range palette.Colors {
+		c.A = 255
+		ep.rgb[i] = c
+	}
+	ep.colors = ep.rgb
+
+	need := background
+	for _, r := range rules {
+		need = need || r.apply
+	}
+	if need {
+		var used [256]bool
+		for fi, f := range frames {
+			n := min(int(f.Width)*int(f.Height), len(f.Pixels))
+			for i := 0; i < n; i++ {
+				if !f.transparentAt(i, rules[fi]) {
+					used[f.Pixels[i]] = true
+				}
+			}
+		}
+		ep.slot, ep.hasSlot = pickSlot(&used, rules)
+	}
+	if ep.hasSlot {
+		ep.colors = make(color.Palette, len(ep.rgb))
+		copy(ep.colors, ep.rgb)
+		ep.colors[ep.slot] = color.Transparent
+	}
+	return ep
+}
+
+func pickSlot(used *[256]bool, rules []keyRule) (uint8, bool) {
+	for _, r := range rules {
+		if r.apply && !used[r.index] {
+			return r.index, true
+		}
+	}
+	for i := range used {
+		if !used[i] {
+			return uint8(i), true
+		}
+	}
+	for _, r := range rules {
+		if r.apply {
+			return r.index, true
+		}
+	}
+	return 0, false
+}
+
+// background returns the index for pixels nothing draws.
+func (ep exportPalette) background(fallback uint8) uint8 {
+	if ep.hasSlot {
+		return ep.slot
+	}
+	return fallback
+}
+
+// drawFrame copies the pixels of f that render opaque under rule onto canvas,
+// with f's top-left at (ox, oy).
+func drawFrame(canvas *image.Paletted, f *Frame, rule keyRule, ox, oy int) {
+	cw, ch := canvas.Rect.Dx(), canvas.Rect.Dy()
+	fw, fh := int(f.Width), int(f.Height)
+	for y := 0; y < fh; y++ {
+		ty := oy + y
+		if ty < 0 || ty >= ch {
+			continue
+		}
+		for x := 0; x < fw; x++ {
+			tx := ox + x
+			if tx < 0 || tx >= cw {
+				continue
+			}
+			i := y*fw + x
+			if f.transparentAt(i, rule) {
+				continue
+			}
+			canvas.Pix[ty*canvas.Stride+tx] = f.Pixels[i]
+		}
+	}
+}
+
 // ToImage converts a frame to an image.Image using the given palette and the
-// auto-resolved transparency index.
+// game's transparency rule (see TransparencyModeMetadata).
 func (f *Frame) ToImage(palette *Palette) *image.Paletted {
-	return f.ToImageWith(palette, RenderOptions{Mode: TransparencyModeAuto})
+	return f.ToImageWith(palette, RenderOptions{})
 }
 
 // ToImageWith renders a frame with explicit transparency handling.
+//
+// Every palette entry is opaque except one transparent slot. Pixels keep
+// their palette index, except transparent ones, which take the slot: normally
+// the frame's key, or another unused index when the frame draws key-valued
+// pixels (see Frame.Opaque). A nil palette uses FallbackPalette. A pixel
+// buffer shorter than Width*Height is padded with transparent pixels.
 func (f *Frame) ToImageWith(palette *Palette, opts RenderOptions) *image.Paletted {
-	var pal color.Palette
-	if palette != nil {
-		pal = palette.ColorModel()
-	} else {
-		pal = FallbackPalette().ColorModel()
-	}
-
-	transIdx, apply := f.resolveTransparency(opts)
-
-	// Set transparency in the palette for GIF encoding. Go's gif package
-	// detects the transparent index by finding color.Transparent in the
-	// palette.
-	palCopy := make(color.Palette, len(pal))
-	copy(palCopy, pal)
-	if apply {
-		palCopy[transIdx] = color.Transparent
-	}
-	pal = palCopy
-
-	img := image.NewPaletted(
-		image.Rect(0, 0, int(f.Width), int(f.Height)),
-		pal,
-	)
-
-	// Validate pixel data matches frame dimensions; corrupt/unusual GAF files
-	// can disagree, so pad or truncate to the expected size.
-	expectedSize := int(f.Width) * int(f.Height)
-	if len(f.Pixels) != expectedSize {
-		if len(f.Pixels) < expectedSize {
-			padded := make([]byte, expectedSize)
-			copy(padded, f.Pixels)
-			for i := len(f.Pixels); i < expectedSize; i++ {
-				padded[i] = transIdx
-			}
-			copy(img.Pix, padded)
-		} else {
-			copy(img.Pix, f.Pixels[:expectedSize])
-		}
-	} else {
-		copy(img.Pix, f.Pixels)
-	}
-
+	img, _ := f.render(palette, opts)
 	return img
 }
 
-// ToGIF converts a sequence to an animated GIF using auto transparency.
+func (f *Frame) render(palette *Palette, opts RenderOptions) (*image.Paletted, exportPalette) {
+	rule := f.keyRule(opts)
+	size := int(f.Width) * int(f.Height)
+	ep := newExportPalette(palette, []*Frame{f}, []keyRule{rule}, len(f.Pixels) < size)
+	img := image.NewPaletted(image.Rect(0, 0, int(f.Width), int(f.Height)), ep.colors)
+	bg := ep.background(f.TransparencyIndex)
+	for i := range img.Pix {
+		if f.transparentAt(i, rule) {
+			img.Pix[i] = bg
+		} else {
+			img.Pix[i] = f.Pixels[i]
+		}
+	}
+	return img, ep
+}
+
+// sequenceCanvases is a sequence rendered onto one shared canvas size.
+type sequenceCanvases struct {
+	images        []*image.Paletted
+	palette       exportPalette
+	width, height int
+}
+
+// renderCanvases places every frame of s on a canvas that holds all of them
+// aligned by hotspot. Frames without pixels give blank canvases.
+func (s *Sequence) renderCanvases(palette *Palette, opts RenderOptions) (*sequenceCanvases, error) {
+	if len(s.Frames) == 0 {
+		return nil, fmt.Errorf("no frames in sequence")
+	}
+	// Frame extends from (-OriginX, -OriginY) to (Width-OriginX,
+	// Height-OriginY) relative to the hotspot.
+	var minX, minY, maxX, maxY int
+	found := false
+	for i, f := range s.Frames {
+		if f == nil {
+			return nil, fmt.Errorf("frame %d is nil", i)
+		}
+		if f.Width == 0 || f.Height == 0 {
+			continue
+		}
+		left, top := -int(f.OriginX), -int(f.OriginY)
+		right, bottom := left+int(f.Width), top+int(f.Height)
+		if !found || left < minX {
+			minX = left
+		}
+		if !found || top < minY {
+			minY = top
+		}
+		if !found || right > maxX {
+			maxX = right
+		}
+		if !found || bottom > maxY {
+			maxY = bottom
+		}
+		found = true
+	}
+	if !found {
+		return nil, fmt.Errorf("no valid frames with non-zero dimensions")
+	}
+	cw, ch := maxX-minX, maxY-minY
+	if int64(cw)*int64(ch) > maxCanvasPixels {
+		return nil, fmt.Errorf("animation canvas %dx%d exceeds maximum of %d pixels", cw, ch, maxCanvasPixels)
+	}
+
+	rules := make([]keyRule, len(s.Frames))
+	background := false
+	for i, f := range s.Frames {
+		rules[i] = f.keyRule(opts)
+		if int(f.Width) != cw || int(f.Height) != ch || len(f.Pixels) < int(f.Width)*int(f.Height) {
+			background = true
+		}
+	}
+	ep := newExportPalette(palette, s.Frames, rules, background)
+	bg := ep.background(0)
+
+	out := &sequenceCanvases{palette: ep, width: cw, height: ch, images: make([]*image.Paletted, 0, len(s.Frames))}
+	for i, f := range s.Frames {
+		canvas := image.NewPaletted(image.Rect(0, 0, cw, ch), ep.colors)
+		for p := range canvas.Pix {
+			canvas.Pix[p] = bg
+		}
+		drawFrame(canvas, f, rules[i], -int(f.OriginX)-minX, -int(f.OriginY)-minY)
+		out.images = append(out.images, canvas)
+	}
+	return out, nil
+}
+
+// ToGIF converts a sequence to an animated GIF using the game's transparency
+// rule.
 func (s *Sequence) ToGIF(palette *Palette) (*gif.GIF, error) {
-	return s.ToGIFWith(palette, RenderOptions{Mode: TransparencyModeAuto})
+	return s.ToGIFWith(palette, RenderOptions{})
 }
 
 // ToGIFWith converts a sequence to an animated GIF using explicit transparency
 // options.
+//
+// Frames are aligned by hotspot on a canvas that holds all of them. The
+// transparent slot is chosen across the whole sequence, so every frame's
+// transparent pixels (whatever its own key) and the canvas area a frame does
+// not cover render transparent, while palette index 0 stays opaque black.
 func (s *Sequence) ToGIFWith(palette *Palette, opts RenderOptions) (*gif.GIF, error) {
-	if len(s.Frames) == 0 {
-		return nil, fmt.Errorf("no frames in sequence")
+	sc, err := s.renderCanvases(palette, opts)
+	if err != nil {
+		return nil, err
 	}
-
-	// Calculate the bounding box that contains all frames when positioned by
-	// their origins. OriginX/OriginY represent the "hotspot" center point of
-	// each frame.
-	var minX, minY, maxX, maxY int16
-	for i, frame := range s.Frames {
-		if frame == nil {
-			continue
-		}
-		// Frame extends from (-OriginX, -OriginY) to (Width-OriginX, Height-OriginY).
-		left := -frame.OriginX
-		top := -frame.OriginY
-		right := int16(frame.Width) - frame.OriginX
-		bottom := int16(frame.Height) - frame.OriginY
-
-		if i == 0 || left < minX {
-			minX = left
-		}
-		if i == 0 || top < minY {
-			minY = top
-		}
-		if i == 0 || right > maxX {
-			maxX = right
-		}
-		if i == 0 || bottom > maxY {
-			maxY = bottom
-		}
-	}
-
-	canvasWidth := int(maxX - minX)
-	canvasHeight := int(maxY - minY)
-
-	// Resolve transparency once from the first frame so the GIF's global
-	// palette is built around what will actually render as transparent.
-	transparencyIndex := uint8(0)
-	applyTransparency := true
-	if len(s.Frames) > 0 && s.Frames[0] != nil {
-		transparencyIndex, applyTransparency = s.Frames[0].resolveTransparency(opts)
-	}
-
-	if canvasWidth <= 0 || canvasHeight <= 0 {
-		return nil, fmt.Errorf("no valid frames with non-zero dimensions")
-	}
-
-	var pal color.Palette
-	if palette != nil {
-		pal = palette.ColorModel()
-	} else {
-		pal = FallbackPalette().ColorModel()
-	}
-
-	palCopy := make(color.Palette, len(pal))
-	copy(palCopy, pal)
-	if applyTransparency {
-		palCopy[transparencyIndex] = color.Transparent
-	}
-	pal = palCopy
-
 	g := &gif.GIF{
-		Image: make([]*image.Paletted, 0, len(s.Frames)),
+		Image: sc.images,
 		Delay: make([]int, 0, len(s.Frames)),
 		Config: image.Config{
-			Width:      canvasWidth,
-			Height:     canvasHeight,
-			ColorModel: pal,
+			Width:      sc.width,
+			Height:     sc.height,
+			ColorModel: sc.palette.colors,
 		},
 	}
-
-	for i, frame := range s.Frames {
-		if frame == nil {
-			return nil, fmt.Errorf("frame %d is nil", i)
-		}
-		if frame.Width == 0 || frame.Height == 0 {
-			return nil, fmt.Errorf("frame %d has invalid dimensions: %dx%d", i, frame.Width, frame.Height)
-		}
-
-		canvas := image.NewPaletted(
-			image.Rect(0, 0, canvasWidth, canvasHeight),
-			pal,
-		)
-
-		// Fill with the transparency index.
-		for i := range canvas.Pix {
-			canvas.Pix[i] = transparencyIndex
-		}
-
-		// Carry the same transparency options through so the per-frame palette
-		// matches the GIF's global palette.
-		frameImg := frame.ToImageWith(palette, opts)
-
-		// Position the frame on the canvas. The frame's top-left is at
-		// (-OriginX, -OriginY) relative to the hotspot; the canvas hotspot is
-		// at (-minX, -minY).
-		xOffset := int(-frame.OriginX - minX)
-		yOffset := int(-frame.OriginY - minY)
-
-		compositeFrameOntoCanvas(canvas, frameImg, frame, xOffset, yOffset,
-			transparencyIndex, applyTransparency, opts)
-
-		g.Image = append(g.Image, canvas)
-
+	for _, frame := range s.Frames {
 		// Duration is in game ticks (1/30th second); GIF delay is in 1/100th
 		// second, so delay = duration * 100/30 = duration * 10 / 3.
 		delay := int(frame.Duration) * 10 / 3
@@ -181,52 +257,13 @@ func (s *Sequence) ToGIFWith(palette *Palette, opts RenderOptions) (*gif.GIF, er
 		}
 		g.Delay = append(g.Delay, delay)
 	}
-
 	return g, nil
 }
 
-// compositeFrameOntoCanvas blits a rendered frame onto a full-size animation
-// canvas, positioning its top-left at (offsetX, offsetY).
-//
-// Each frame is rendered by ToImageWith as raw palette indices. When a frame's
-// own resolved transparent index differs from the sequence-wide global index —
-// as happens with TA: Kingdoms uncompressed atlases, where one frame resolves
-// index 9 and another resolves index 0 — a raw blit would composite that
-// frame's transparent background as an opaque palette entry (the global palette
-// only marks globalTransIdx transparent). To keep every frame's background
-// transparent, any pixel equal to the frame's own transparent index is remapped
-// to globalTransIdx, the slot the animation marks transparent.
-func compositeFrameOntoCanvas(canvas, frameImg *image.Paletted, frame *Frame, offsetX, offsetY int, globalTransIdx uint8, applyTransparency bool, opts RenderOptions) {
-	canvasW := canvas.Rect.Dx()
-	canvasH := canvas.Rect.Dy()
-
-	frameTransIdx, frameApply := frame.resolveTransparency(opts)
-	remap := applyTransparency && frameApply && frameTransIdx != globalTransIdx
-
-	for y := 0; y < int(frame.Height); y++ {
-		for x := 0; x < int(frame.Width); x++ {
-			canvasX := x + offsetX
-			canvasY := y + offsetY
-			if canvasX < 0 || canvasX >= canvasW || canvasY < 0 || canvasY >= canvasH {
-				continue
-			}
-			srcIdx := y*int(frame.Width) + x
-			dstIdx := canvasY*canvasW + canvasX
-			if srcIdx >= len(frameImg.Pix) || dstIdx >= len(canvas.Pix) {
-				continue
-			}
-			px := frameImg.Pix[srcIdx]
-			if remap && px == frameTransIdx {
-				px = globalTransIdx
-			}
-			canvas.Pix[dstIdx] = px
-		}
-	}
-}
-
-// WriteGIF writes an animated GIF to the given writer using auto transparency.
+// WriteGIF writes an animated GIF to the given writer using the game's
+// transparency rule.
 func (s *Sequence) WriteGIF(w io.Writer, palette *Palette) error {
-	return s.WriteGIFWith(w, palette, RenderOptions{Mode: TransparencyModeAuto})
+	return s.WriteGIFWith(w, palette, RenderOptions{})
 }
 
 // WriteGIFWith writes an animated GIF using explicit transparency options.

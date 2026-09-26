@@ -47,13 +47,15 @@ func (v Variant) String() string {
 // DefaultRenderOptions returns the transparency policy that best matches a
 // variant's authored assets.
 //
-// TA: Kingdoms texture-atlas GAFs frequently carry a TransparencyIndex that
-// does not match the pixel value the artist used for the transparent fill, so
-// the corner-detect heuristic (TransparencyModeAuto) gives the most faithful
-// result. Total Annihilation assets store an honest TransparencyIndex, which
-// the same Auto mode also handles, so both currently resolve to Auto; keeping
-// the choice behind this helper lets the policies diverge later without
-// touching call sites.
+// Total Annihilation (and an unknown variant) get TransparencyModeMetadata,
+// the game's rule: the stored key for raw frames, skipped pixels for
+// compressed ones. TA: Kingdoms raw texture atlases frequently carry a
+// TransparencyIndex that does not match the pixel value the artist used for
+// the transparent fill, so VariantTAK gets TransparencyModeHeuristic, which
+// may pick a uniform corner colour for raw frames.
 func (v Variant) DefaultRenderOptions() RenderOptions {
-	return RenderOptions{Mode: TransparencyModeAuto}
+	if v == VariantTAK {
+		return RenderOptions{Mode: TransparencyModeHeuristic}
+	}
+	return RenderOptions{Mode: TransparencyModeMetadata}
 }

@@ -111,11 +111,8 @@ func TestPaletteLoading(t *testing.T) {
 		t.Errorf("Expected 256 colors, got %d", len(palette.Colors))
 	}
 
-	if palette.Colors[0].A != 0 {
-		t.Errorf("Color 0 should be transparent, got alpha=%d", palette.Colors[0].A)
-	}
-
-	for i := 1; i < 256; i++ {
+	// The game draws index 0 as black; transparency is decided per frame.
+	for i := 0; i < 256; i++ {
 		if palette.Colors[i].A != 255 {
 			t.Errorf("Color %d should be opaque, got alpha=%d", i, palette.Colors[i].A)
 			break
