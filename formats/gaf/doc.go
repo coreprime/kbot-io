@@ -1,0 +1,64 @@
+// Package gaf implements reading and writing of Total Annihilation and TA:
+// Kingdoms GAF (Graphics Animation Format) files.
+//
+// The on-disk binary layout is identical between both games; only palette
+// resolution differs. See Variant for how callers signal which game an
+// asset belongs to.
+//
+// # Layout
+//
+// All values are little-endian.
+//
+//	header (12 bytes)        version, sequence count, unused word
+//	sequence pointers        one uint32 offset per sequence
+//	sequence header (40)     frame count (uint16), loop word (uint16),
+//	                         unused word (uint32), name (32 bytes, NUL-padded)
+//	frame list               per frame: frame header offset, duration word
+//	frame header (24)        width, height, origin x/y (int16), key byte,
+//	                         storage byte, layer count byte (+10), blend
+//	                         byte (+11), word +12, data offset, word +20
+//
+// # Reading rules
+//
+// The reader follows the way TA 3.1c reads these files:
+//
+//   - The version word is not checked. Stock files use VersionTA or 0; any
+//     other value is accepted and reported by Reader.Warnings.
+//   - The sequence count is the low 16 bits of its word, read as a signed
+//     value: 1 to 32767 sequences, and none for zero or a negative value.
+//   - The low byte of the sequence loop word (Sequence.LoopFlags) says
+//     whether the sequence loops (every stock sequence stores 1) or plays
+//     once.
+//   - A frame's duration is the low 16 bits of its word, in ticks of the
+//     30 Hz animation clock. A frame shows for max(duration, 1) ticks.
+//   - Byte +10 of a frame header is its layer count and byte +11 a separate
+//     flag (Frame.Blend); they are not one 16-bit count. A composite frame
+//     (layer count above zero) points at a table of layer header offsets.
+//     The game draws each layer so that its hotspot lands on the frame's
+//     hotspot, and draws a layer whose +11 byte is set translucently.
+//   - A storage byte of 0 means raw pixels (Width*Height palette indices),
+//     any other value row compression. Raw frames are drawn with every
+//     pixel except those equal to the frame's transparency index (key);
+//     compressed frames draw every repeated or copied pixel, even one equal
+//     to the key, and only skip commands are transparent (Frame.Opaque
+//     records the difference when it matters). Palette index 0 is ordinary
+//     opaque black.
+//   - A frame with no pixels reads no data, whatever its data offset.
+//
+// The reader keeps every field it reads, including the words the game does
+// not interpret, so a file can be written back unchanged. It flattens each
+// composite frame into Pixels (clipped to the frame's own rectangle) and also
+// keeps the layers in Frame.Layers.
+//
+// Some structures the game cannot load are read anyway and reported by
+// Reader.Warnings: a layer that is itself a composite or refers back to its
+// own frame (skipped), and a frame header referenced from more than one
+// place (decoded once per reference). A compressed row whose commands end
+// before the frame width is padded with transparent pixels and reported; the
+// game would read on into the following bytes. No stock file has any of
+// these.
+//
+// Reading is bounded: a frame may hold at most 64 Mi pixels, one file may
+// decode to at most 512 MiB of pixel data in total and hold at most 2^20
+// frame headers, so a small crafted file cannot exhaust memory.
+package gaf
