@@ -37,6 +37,10 @@ const (
 // the game fill the primitive with its colour index instead of texturing it.
 const ColoredFlag = 0x1
 
+// MissingTextureColor is the palette index TA 3.1c fills a primitive with
+// when its texture name does not resolve to a texture.
+const MissingTextureColor = 0xd1
+
 // ErrMalformed is wrapped by every error LoadFromBytes and LoadFromReader
 // return for a file that is truncated or structurally damaged. Errors for data
 // that runs past the end of the file also wrap io.ErrUnexpectedEOF.
@@ -88,7 +92,8 @@ type Object struct {
 	YFromParent int32
 	ZFromParent int32
 	// SelectionPrim is the stored selection primitive index; -1 means none.
-	// Shipped child pieces also carry stale values.
+	// Shipped child pieces also carry stale values. HiddenPrimitive applies
+	// the game's rule for which primitive it never draws.
 	SelectionPrim int32
 	// Children are the objects on this object's child chain, in file order.
 	Children []*Object
