@@ -13,6 +13,37 @@
 // Shared on-disk primitives (the entry tree, header, LZ77, chunk decoding, and
 // the XOR cipher) live in hpi/common. The v1 and v2 sub-packages build their
 // readers and writers on top of it.
+//
+// # What TA 3.1c accepts
+//
+// TA 3.1c reads version 1 archives only; version 2 is TA: Kingdoms. The game
+// mounts a version 1 archive only when its last 36 bytes read "Copyright ____
+// Cavedog Entertainment" (any four year characters). Validate and OpenForGame
+// apply those checks and report the header key, effective XOR key and
+// trailer. The readers themselves open archives without a trailer, so such
+// files can still be inspected and extracted.
+//
+// Inside an archive the game:
+//
+//   - treats header key bytes 0 and 0xFF as "not encrypted";
+//   - splits paths on '\' and '/', folds ASCII letter case only, and takes
+//     the last of several entries with the same name (common.Entry.Find);
+//   - marks directories with bit 0 of the entry flag byte only;
+//   - reads compression byte 0 as a stored entry and any other value as a
+//     chunked entry, whose chunks it locates through the chunk-size table and
+//     places in fixed 64 KiB blocks;
+//   - accepts only SQSH types 1 (LZ77) and 2 (zlib) inside chunks. Type 0
+//     (stored) is refused, so writers never emit it: an uncompressed file is
+//     written as a stored entry instead. An LZ77 chunk must end with its
+//     terminator and decode to exactly its stated size. A zlib chunk that ends
+//     cleanly must also match; a corrupt, over-long or checksum-failing zlib
+//     stream keeps its stated size (see common.DecodeBlock and
+//     v1.ReadOptions.Strict).
+//
+// The v1 package documentation lists the directory rules in full. The v1 and
+// v2 writers refuse empty, "." and ".." path segments and names longer than
+// common.MaxNameLength (255) bytes, the longest name a Windows file system
+// holds; readers accept names of any length.
 package hpi
 
 import (
