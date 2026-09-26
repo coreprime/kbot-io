@@ -13,6 +13,9 @@ import (
 // Decompiler converts COB bytecode to BOS source or disassembly
 type Decompiler struct {
 	cob *scripting.COB
+	// err is the first problem translateInstruction met in the script
+	// being decompiled (an instruction with no BOS form).
+	err error
 }
 
 // NewDecompiler creates a new decompiler
@@ -24,8 +27,9 @@ func NewDecompiler(cob *scripting.COB) *Decompiler {
 func (d *Decompiler) Decompile() (string, error) {
 	var sb strings.Builder
 
-	// Header comment
-	sb.WriteString("// Decompiled from COB bytecode\n")
+	// Header comment. The first line differs from the banner of earlier
+	// versions, which the compiler takes as a sign of raw angle values.
+	sb.WriteString("// Decompiled from COB bytecode; angles in <degrees>, distances in [units]\n")
 	sb.WriteString("// Some details may differ from original source\n\n")
 
 	// COB metadata directives the compiler honors for round-trip fidelity.
@@ -34,6 +38,11 @@ func (d *Decompiler) Decompile() (string, error) {
 	// `.sound_name "..."` emits the TAK-only per-COB sound-name table; the
 	// writer rebuilds the v6 sub-header + offset table from those entries.
 	fmt.Fprintf(&sb, ".version %d\n", d.cob.VersionSignature)
+	if d.cob.UKZero != 0 {
+		fmt.Fprintf(&sb, ".field5 %d\n", d.cob.UKZero)
+	}
+	// Movement values are written as <degrees> and [units] literals.
+	sb.WriteString(".angle_units degrees\n")
 	for _, s := range d.cob.SoundNames {
 		fmt.Fprintf(&sb, ".sound_name %q\n", s)
 	}
@@ -95,10 +104,7 @@ func (d *Decompiler) Decompile() (string, error) {
 
 	// Decompile each script
 	for i := 0; i < int(d.cob.NumScripts); i++ {
-		scriptName := fmt.Sprintf("script_%d", i)
-		if i < len(d.cob.ScriptNames) && d.cob.ScriptNames[i] != "" {
-			scriptName = d.cob.ScriptNames[i]
-		}
+		scriptName := d.scriptName(i)
 
 		script, err := d.decompileScript(i, scriptName, globalSignalDefines, globalNames)
 		if err != nil {
@@ -121,6 +127,9 @@ func (d *Decompiler) Disassemble(format assembly.Format) (string, error) {
 	// Structured header — parsed by the assembler for roundtrip.
 	fmt.Fprintf(&sb, ".version %d\n", d.cob.VersionSignature)
 	fmt.Fprintf(&sb, ".statics %d\n", d.cob.NumberOfStaticVars)
+	if d.cob.UKZero != 0 {
+		fmt.Fprintf(&sb, ".field5 %d\n", d.cob.UKZero)
+	}
 
 	// TA: Kingdoms v6 COBs carry a per-file sound-name table referenced
 	// from the bytecode by index. Emit each entry as a `.sound_name`
@@ -217,7 +226,7 @@ func (d *Decompiler) decompileScript(index int, name string, signalDefines map[i
 	maxLocal := -1
 	for _, in := range instructions {
 		switch in.Opcode {
-		case scripting.OP_PUSH_LOCAL_VAR, scripting.OP_POP_LOCAL_VAR, scripting.OP_CREATE_LOCAL:
+		case scripting.OP_PUSH_LOCAL_VAR, scripting.OP_POP_LOCAL_VAR:
 			if int(in.Operand) > maxLocal {
 				maxLocal = int(in.Operand)
 			}
@@ -278,8 +287,16 @@ func (d *Decompiler) decompileScript(index int, name string, signalDefines map[i
 	}
 
 	// Use recursive control flow analyzer for better nested structure handling
+	d.err = nil
 	analyzer := NewControlFlowAnalyzer(d, instructions, paramNames, signalDefines, globalNames)
 	body := analyzer.ProcessRange(0, len(instructions), 1)
+	if d.err != nil {
+		return "", d.err
+	}
+	if analyzer.stack.underflows > 0 {
+		return "", fmt.Errorf("an instruction pops a value no expression produced (%d times); use the disassembler",
+			analyzer.stack.underflows)
+	}
 
 	for _, line := range body {
 		sb.WriteString(line)
@@ -686,13 +703,48 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		}
 		return ""
 
-	case scripting.OP_MOD: // 0x24
+	case scripting.OP_XOR: // 0x10037000
 		if b := stack.pop(); b != "" {
 			if a := stack.pop(); a != "" {
-				stack.push(fmt.Sprintf("(%s %% %s)", a, b))
+				stack.push(fmt.Sprintf("(%s ^ %s)", a, b))
 			}
 		}
 		return ""
+
+	case scripting.OP_XOR_ALT: // 0x10059000, bitwise XOR in the logical group
+		if b := stack.pop(); b != "" {
+			if a := stack.pop(); a != "" {
+				stack.push(fmt.Sprintf("(%s XOR %s)", a, b))
+			}
+		}
+		return ""
+
+	case scripting.OP_NOT: // 0x10038000, unary bitwise NOT
+		if val := stack.pop(); val != "" {
+			stack.push(fmt.Sprintf("~%s", val))
+		}
+		return ""
+
+	case scripting.OP_IS_CARRYING_UNIT:
+		if val := stack.pop(); val != "" {
+			stack.push(fmt.Sprintf("__is_carrying_unit(%s)", val))
+		}
+		return ""
+
+	case scripting.OP_CARRIER_UNIT_ID:
+		stack.push("__carrier_unit_id()")
+		return ""
+
+	case scripting.OP_DISCARD_CALL:
+		// Two inline words; the second is the number of stack values the
+		// game pops and discards.
+		args := popNReverse(stack, int(inst.Operand2))
+		return fmt.Sprintf("__discard_call(%s);", strings.Join(append([]string{fmt.Sprint(inst.Operand)}, args...), ", "))
+
+	case scripting.OP_PIECE_OP_09:
+		second := stack.pop()
+		first := stack.pop()
+		return fmt.Sprintf("__piece_op_09(%s, %s, %s);", d.pieceName(int(inst.Operand)), first, second)
 
 	// Bitwise operations
 	case scripting.OP_BITWISE_AND: // 0x28
@@ -738,19 +790,13 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		}
 		return ""
 
-	// TA: Kingdoms stack-neutral math intrinsics. We wrap the top of the
-	// symbolic stack so a `local = 3 * 2 ; TAK_MATH_09 ; POP_LOCAL` site
-	// decompiles to `local = __tak_math_09(3 * 2);` — round-tripping back
-	// through the compiler reinstates the opcode at the same offset.
-	case scripting.OP_TAK_MATH_09:
-		if v := stack.pop(); v != "" {
-			stack.push(fmt.Sprintf("__tak_math_09(%s)", v))
-		}
-		return ""
-	case scripting.OP_TAK_MATH_0B:
-		if v := stack.pop(); v != "" {
-			stack.push(fmt.Sprintf("__tak_math_0b(%s)", v))
-		}
+	// TA: Kingdoms binary math operators of undocumented meaning. Each pops
+	// two values and pushes one, so `PUSH 3 ; PUSH x ; TAK_MATH_09` becomes
+	// `__tak_math_09(3, x)`; the compiler emits the same sequence back.
+	case scripting.OP_TAK_MATH_09, scripting.OP_TAK_MATH_0A, scripting.OP_TAK_MATH_0B:
+		b := stack.pop()
+		a := stack.pop()
+		stack.push(fmt.Sprintf("%s(%s, %s)", takMathIntrinsic[inst.Opcode], a, b))
 		return ""
 
 	// TA: Kingdoms DONT_SHADOW — disables shadow casting for one piece.
@@ -787,12 +833,6 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			expr = fmt.Sprintf("Mission-Command(%s)", cmd)
 		}
 		stack.push(expr)
-		return ""
-
-	case scripting.OP_BITWISE_NOT: // 0x2B
-		if val := stack.pop(); val != "" {
-			stack.push(fmt.Sprintf("~%s", val))
-		}
 		return ""
 
 	// Comparison operations
@@ -895,7 +935,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			speed = "0"
 		}
 
-		return fmt.Sprintf("move %s to %s-axis <%s> speed <%s>;", pieceName, axisName, distance, speed)
+		return fmt.Sprintf("move %s to %s-axis %s speed %s;", pieceName, axisName, linearValue(distance), linearValue(speed))
 
 	case scripting.OP_MOVE_NOW: // 0x1000B000
 		// Move immediately (no speed parameter)
@@ -916,7 +956,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			axisName = []string{"x", "y", "z"}[axisID]
 		}
 
-		return fmt.Sprintf("move %s to %s-axis <%s> now;", pieceName, axisName, position)
+		return fmt.Sprintf("move %s to %s-axis %s now;", pieceName, axisName, linearValue(position))
 
 	case scripting.OP_TURN_NOW: // 0x1000C000
 		// Turn immediately (no speed parameter)
@@ -937,7 +977,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			axisName = []string{"x", "y", "z"}[axisID]
 		}
 
-		return fmt.Sprintf("turn %s to %s-axis <%s> now;", pieceName, axisName, angle)
+		return fmt.Sprintf("turn %s to %s-axis %s now;", pieceName, axisName, angleValue(angle))
 
 	case scripting.OP_TURN: // 0x10002000
 		// TA COB format: turn <piece> to <axis>-axis <angle> speed <speed>
@@ -964,8 +1004,8 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 			axisName = []string{"x", "y", "z"}[axisID]
 		}
 
-		return fmt.Sprintf("turn %s to %s-axis <%s> speed <%s>;",
-			pieceName, axisName, direction, speed)
+		return fmt.Sprintf("turn %s to %s-axis %s speed %s;",
+			pieceName, axisName, angleValue(direction), angleValue(speed))
 
 	case scripting.OP_SPIN: // 0x10003000
 		// Format: spin <piece> around <axis>-axis speed <speed>;
@@ -990,7 +1030,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		speedRaw := stack.pop()
 		accelRaw := stack.pop()
 
-		return fmt.Sprintf("spin %s around %s-axis speed <%s> accelerate <%s>;", pieceName, axisName, speedRaw, accelRaw)
+		return fmt.Sprintf("spin %s around %s-axis speed %s accelerate %s;", pieceName, axisName, angleValue(speedRaw), angleValue(accelRaw))
 
 	case scripting.OP_SHOW: // 0x10005000
 		// Format: show <piece>;
@@ -1061,7 +1101,7 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		// Deceleration value is on the stack
 		decelRaw := stack.pop()
 
-		return fmt.Sprintf("stop-spin %s around %s-axis decelerate <%s>;", pieceName, axisName, decelRaw)
+		return fmt.Sprintf("stop-spin %s around %s-axis decelerate %s;", pieceName, axisName, angleValue(decelRaw))
 
 	case scripting.OP_EMIT_SFX: // 0x1000F000
 		// Format: emit-sfx <type> from <piece>;
@@ -1210,20 +1250,14 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 
 	// Control flow
 	case scripting.OP_CALL_SCRIPT: // 0x10062000
-		scriptName := fmt.Sprintf("script_%d", inst.Operand)
-		if int(inst.Operand) >= 0 && int(inst.Operand) < len(d.cob.ScriptNames) && d.cob.ScriptNames[inst.Operand] != "" {
-			scriptName = d.cob.ScriptNames[inst.Operand]
-		}
+		scriptName := d.scriptName(int(inst.Operand))
 		// Operand2 is param count — pop that many args off the stack
 		paramCount := int(inst.Operand2)
 		params := popNReverse(stack, paramCount)
 		return fmt.Sprintf("call-script %s(%s);", scriptName, strings.Join(params, ", "))
 
 	case scripting.OP_START_SCRIPT: // 0x10061000
-		scriptName := fmt.Sprintf("script_%d", inst.Operand)
-		if int(inst.Operand) >= 0 && int(inst.Operand) < len(d.cob.ScriptNames) && d.cob.ScriptNames[inst.Operand] != "" {
-			scriptName = d.cob.ScriptNames[inst.Operand]
-		}
+		scriptName := d.scriptName(int(inst.Operand))
 		// Operand2 is param count — pop that many args off the stack
 		paramCount := int(inst.Operand2)
 		params := popNReverse(stack, paramCount)
@@ -1256,17 +1290,89 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		stack.pop() // Pop condition (will be reconstructed in if statement)
 		return ""
 
+	case scripting.OP_STACK_ALLOC:
+		// Local slots are declared from the STACK_ALLOC count; the TA:
+		// Kingdoms `STACK_ALLOC ; RETURN` epilogue is `return;`.
+		return ""
+
+	case scripting.OP_SHADE: // 0x1000D000
+		return fmt.Sprintf("shade %s;", d.pieceName(int(inst.Operand)))
+
 	default:
-		// Unknown/unimplemented opcode — skip silently.
+		// No BOS form: an instruction no game runs, or a PUSH/POP whose
+		// flag bits the game refuses. Decompiling past it would print BOS
+		// that compiles to different code, so stop.
+		if d.err == nil {
+			d.err = fmt.Errorf("instruction %s (0x%08X) at 0x%04X has no BOS form; use the disassembler",
+				inst.Mnemonic(), inst.Word(), inst.Offset)
+		}
 		return ""
 	}
 
 	return ""
 }
 
+// angleValue writes an integer constant as a <degrees> literal; any other
+// expression is returned unchanged.
+func angleValue(expr string) string {
+	if v, err := strconv.ParseInt(expr, 10, 32); err == nil {
+		return scripting.AngleLiteral(int32(v))
+	}
+	return expr
+}
+
+// linearValue writes an integer constant as a [units] literal; any other
+// expression is returned unchanged.
+func linearValue(expr string) string {
+	if v, err := strconv.ParseInt(expr, 10, 32); err == nil {
+		return scripting.LinearLiteral(int32(v))
+	}
+	return expr
+}
+
+// takMathIntrinsic names the BOS intrinsic of each TA: Kingdoms math opcode.
+var takMathIntrinsic = map[uint32]string{
+	scripting.OP_TAK_MATH_09: "__tak_math_09",
+	scripting.OP_TAK_MATH_0A: "__tak_math_0a",
+	scripting.OP_TAK_MATH_0B: "__tak_math_0b",
+}
+
+// scriptName returns the BOS name of a script: its name from the COB, or
+// script_N when the name is empty or not a valid identifier.
+func (d *Decompiler) scriptName(i int) string {
+	if i >= 0 && i < len(d.cob.ScriptNames) && isIdentifier(d.cob.ScriptNames[i]) {
+		return d.cob.ScriptNames[i]
+	}
+	return fmt.Sprintf("script_%d", i)
+}
+
+// pieceName returns the declared name of a piece, or piece_N.
+func (d *Decompiler) pieceName(i int) string {
+	if i >= 0 && i < len(d.cob.PieceNames) && d.cob.PieceNames[i] != "" {
+		return d.cob.PieceNames[i]
+	}
+	return fmt.Sprintf("piece_%d", i)
+}
+
+func isIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		letter := r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+		if !letter && (i == 0 || r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
+}
+
 // exprStack is a simple stack for managing expression building
 type exprStack struct {
 	items []string
+	// underflows counts pops from an empty stack: the bytecode consumed a
+	// value no expression produced.
+	underflows int
 }
 
 func newExprStack() *exprStack {
@@ -1279,6 +1385,7 @@ func (s *exprStack) push(item string) {
 
 func (s *exprStack) pop() string {
 	if len(s.items) == 0 {
+		s.underflows++
 		return ""
 	}
 	item := s.items[len(s.items)-1]
