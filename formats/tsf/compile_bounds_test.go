@@ -111,6 +111,21 @@ func TestDirResolverStaysInsideRoot(t *testing.T) {
 	}
 }
 
+func TestEmptyDirResolverUsesWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "img.png"), tinyPNG(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	res := DirResolver("")
+	if _, err := res.Resolve("IMG.png"); err != nil {
+		t.Fatalf("Resolve(IMG.png): %v", err)
+	}
+	if _, err := res.Resolve("../img.png"); err == nil {
+		t.Error("Resolve(../img.png) escaped the working directory")
+	}
+}
+
 // pngHeader returns a PNG signature and IHDR chunk claiming w×h RGBA pixels,
 // enough for image.DecodeConfig.
 func pngHeader(w, h uint32) []byte {

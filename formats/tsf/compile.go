@@ -165,7 +165,8 @@ func (m MemoryResolver) Resolve(filename string) (*image.NRGBA, error) {
 // case-insensitive to match the game's tolerant filename handling, and a
 // backslash separates directories as in the game's own paths. Names are
 // confined to the directory: absolute paths and names that climb out of it
-// with ".." are rejected, and symbolic links cannot lead outside it.
+// with ".." are rejected, and symbolic links cannot lead outside it. An empty
+// DirResolver resolves against the working directory.
 type DirResolver string
 
 // Resolve implements ImageResolver.
@@ -174,7 +175,11 @@ func (d DirResolver) Resolve(filename string) (*image.NRGBA, error) {
 	if err != nil {
 		return nil, err
 	}
-	root, err := os.OpenRoot(string(d))
+	dir := string(d)
+	if dir == "" {
+		dir = "."
+	}
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, err
 	}
