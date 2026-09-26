@@ -116,8 +116,8 @@ func GenerateWebDisassembly(cob *scripting.COB) (string, error) {
 			webInsts[j] = WebInstruction{
 				Index:       j,
 				Offset:      inst.Offset,
-				Opcode:      scripting.OpcodeName(inst.Opcode),
-				OpcodeHex:   fmt.Sprintf("0x%08X", inst.Opcode),
+				Opcode:      inst.Mnemonic(),
+				OpcodeHex:   fmt.Sprintf("0x%08X", inst.Word()),
 				Operand:     inst.Operand,
 				OperandHex:  fmt.Sprintf("0x%X", uint32(inst.Operand)&0xFFFFFF),
 				Description: getInstructionDescription(cob, inst),

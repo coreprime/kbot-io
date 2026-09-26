@@ -76,7 +76,7 @@ func (dv *Disassembler) renderPlain() string {
 	jumps := dv.analyzeJumps()
 
 	for i, inst := range dv.instructions {
-		opname := scripting.OpcodeName(inst.Opcode)
+		opname := inst.Mnemonic()
 		paramCount := scripting.OpcodeParamCount(inst.Opcode)
 
 		// Base: offset + opcode + first operand (if any)
@@ -127,7 +127,7 @@ func (dv *Disassembler) renderAnnotated() string {
 		flowPrefix := flowChars[i]
 
 		// Format instruction
-		opname := scripting.OpcodeName(inst.Opcode)
+		opname := inst.Mnemonic()
 		paramCount := scripting.OpcodeParamCount(inst.Opcode)
 		var instrLine string
 		switch {
@@ -150,7 +150,7 @@ func (dv *Disassembler) renderAnnotated() string {
 		}
 
 		// Add hex representation
-		instrLine += fmt.Sprintf("  (0x%08X)", inst.Opcode)
+		instrLine += fmt.Sprintf("  (0x%08X)", inst.Word())
 
 		// Combine flow prefix and instruction
 		fmt.Fprintf(&sb, "║ %s %s\n", flowPrefix, instrLine)
