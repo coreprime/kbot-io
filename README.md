@@ -14,7 +14,10 @@ depend on the format code without pulling in the full CLI.
     `crt`, `bik`/`smacker` (video), `objects3d` (3DO/TDO models),
     `tdf` (config files), `gamedata` (unit/weapon definitions for TA and TA:K),
     `scripting` (COB scripting: parser, compiler, decompiler, assembly, linter),
-    and `ai`.
+    and `ai`. The COB tools follow the game's rules: opcodes are decoded the
+    way TA 3.1c dispatches them, the compiler refuses code the game would
+    fault on or mis-run, and the linter flags TA: Kingdoms-only instructions
+    in TA scripts (see the `formats/scripting` package documentation).
 - **`filesystem/`** — a layered virtual filesystem (`vfs`) that transparently
   reads files from packed HPI archives and loose directories.
 - **`palettes/`** — the embedded default TA color palette plus the per-kingdom
