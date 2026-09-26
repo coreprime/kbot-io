@@ -189,6 +189,21 @@ func CheckDuplicateTiles(in Input) Diagnostic {
 	}
 }
 
+// startCell returns the attribute cell a start position lies in. It
+// rounds toward negative infinity, so a start a few pixels west or north of
+// the map lands in cell -1 (out of bounds) rather than cell 0.
+func startCell(sp StartPos) (ax, ay int) {
+	return floorDiv(sp.X, 16), floorDiv(sp.Z, 16)
+}
+
+func floorDiv(a, b int) int {
+	q := a / b
+	if (a%b != 0) && ((a < 0) != (b < 0)) {
+		q--
+	}
+	return q
+}
+
 // CheckStartPositionsInBounds confirms every schema's start
 // positions land on a passable attribute cell that's inside the map.
 func CheckStartPositionsInBounds(in Input) Diagnostic {
@@ -202,8 +217,7 @@ func CheckStartPositionsInBounds(in Input) Diagnostic {
 	var bad []string
 	for si, s := range in.OTA.Schemas {
 		for _, sp := range s.StartPos {
-			ax := sp.X / 16
-			ay := sp.Z / 16
+			ax, ay := startCell(sp)
 			if ax < 0 || ay < 0 || ax >= attrW || ay >= attrH {
 				bad = append(bad, fmt.Sprintf("Schema %d / StartPos%d (out of bounds)", si+1, sp.Number))
 				continue
@@ -327,7 +341,7 @@ func CheckVoidIslands(in Input) Diagnostic {
 	}
 	for _, s := range in.OTA.Schemas {
 		for _, sp := range s.StartPos {
-			push(sp.X/16, sp.Z/16)
+			push(startCell(sp))
 		}
 	}
 	for len(queue) > 0 {

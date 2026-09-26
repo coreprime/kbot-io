@@ -3,12 +3,14 @@ package tnt
 import (
 	"fmt"
 	"image/color"
+	"strings"
 )
 
-// LintSeverity classifies a TNT lint finding.  TNT lints currently
-// describe size-reduction opportunities so all findings are LintInfo;
-// the type is kept severity-shaped to match the COB linter and keep the
-// explorer's lint UI uniform across formats.
+// LintSeverity classifies a TNT lint finding.  Size-reduction
+// opportunities are LintInfo; problems that change how the game or other
+// readers see the map are LintWarning.  The type is kept severity-shaped to
+// match the COB linter and keep the explorer's lint UI uniform across
+// formats.
 type LintSeverity string
 
 const (
@@ -17,6 +19,17 @@ const (
 	LintInfo LintSeverity = "info"
 	// LintWarning is a potentially-impactful finding.
 	LintWarning LintSeverity = "warning"
+)
+
+// Rule names reported in LintDiagnostic.Rule.
+const (
+	LintRuleDuplicateTiles    = "duplicate-tiles"
+	LintRuleSimilarTiles      = "similar-tiles"
+	LintRuleUnusedTiles       = "unused-tiles"
+	LintRuleBadTileIndex      = "bad-tile-index"
+	LintRuleUnresolvedFeature = "unresolved-feature"
+	LintRuleInterchangeBounds = "interchange-bounds"
+	LintRuleMinimap           = "minimap"
 )
 
 // LintDiagnostic is one finding from Map.Lint.  Count and BytesSaved
@@ -43,8 +56,22 @@ type LintOptions struct {
 	Palette color.Palette
 }
 
-// Lint inspects the map for size-reduction opportunities without
-// mutating it.  Each rule mirrors a pass of Map.Optimize:
+// Lint inspects the map without mutating it.  The warning rules report
+// data the game reads differently from what the map intends, or that other
+// readers may refuse (TA maps only):
+//
+//	bad-tile-index      tile map cells naming a tile beyond the tile set;
+//	                    the game reads past its tile set there
+//	unresolved-feature  cells whose feature word is below the sentinel
+//	                    floor but not below Header.TileAnims; the game
+//	                    places nothing there
+//	interchange-bounds  a map beyond the interchange bounds
+//	                    (InterchangeMaxAttrSide, InterchangeMaxFileSize)
+//	minimap             no minimap (info), or one too small for the game's
+//	                    radar (warning)
+//
+// The info rules report size-reduction opportunities; each mirrors a pass
+// of Map.Optimize:
 //
 //	duplicate-tiles  tile graphics with byte-identical pixel data
 //	similar-tiles    visually-similar tile graphics whose placements
@@ -67,11 +94,11 @@ func (m *Map) Lint(opts LintOptions) ([]LintDiagnostic, error) {
 		return nil, err
 	}
 
-	diags := make([]LintDiagnostic, 0, 3)
+	diags := m.validityDiagnostics()
 	if stats.ExactMerges > 0 {
 		n := stats.ExactMerges
 		diags = append(diags, LintDiagnostic{
-			Rule:       "duplicate-tiles",
+			Rule:       LintRuleDuplicateTiles,
 			Severity:   LintInfo,
 			Count:      n,
 			BytesSaved: n * TileGfxSize,
@@ -83,7 +110,7 @@ func (m *Map) Lint(opts LintOptions) ([]LintDiagnostic, error) {
 	if stats.SimilarityMerges > 0 {
 		n := stats.SimilarityMerges
 		diags = append(diags, LintDiagnostic{
-			Rule:       "similar-tiles",
+			Rule:       LintRuleSimilarTiles,
 			Severity:   LintInfo,
 			Count:      n,
 			BytesSaved: n * TileGfxSize,
@@ -95,7 +122,7 @@ func (m *Map) Lint(opts LintOptions) ([]LintDiagnostic, error) {
 	if stats.UnusedRemoved > 0 {
 		n := stats.UnusedRemoved
 		diags = append(diags, LintDiagnostic{
-			Rule:       "unused-tiles",
+			Rule:       LintRuleUnusedTiles,
 			Severity:   LintInfo,
 			Count:      n,
 			BytesSaved: n * TileGfxSize,
@@ -105,6 +132,59 @@ func (m *Map) Lint(opts LintOptions) ([]LintDiagnostic, error) {
 		})
 	}
 	return diags, nil
+}
+
+// validityDiagnostics returns the warning-rule findings for a TA map.
+func (m *Map) validityDiagnostics() []LintDiagnostic {
+	var diags []LintDiagnostic
+	if m.IsTAK {
+		return diags
+	}
+	if n, first := m.countBadTileIndices(); n > 0 {
+		diags = append(diags, LintDiagnostic{
+			Rule:     LintRuleBadTileIndex,
+			Severity: LintWarning,
+			Count:    n,
+			Message: fmt.Sprintf(
+				"%d tile map cell%s reference tiles beyond the %d-tile set (first: index %d at tile %s); the game reads past its tile set there",
+				n, pluralS(n), len(m.Tiles), m.TileMap[first], cellName(first, m.TileW)),
+		})
+	}
+	count := m.featureTableSize()
+	if n, first := m.countUnresolvedFeatures(count); n > 0 {
+		diags = append(diags, LintDiagnostic{
+			Rule:     LintRuleUnresolvedFeature,
+			Severity: LintWarning,
+			Count:    n,
+			Message: fmt.Sprintf(
+				"%d cell%s hold feature words beyond the %d-entry feature table (first: %d at cell %s); the game places nothing there",
+				n, pluralS(n), count, m.TileAttr[first].Feature, cellName(first, m.AttrW)),
+		})
+	}
+	if msgs := m.boundsWarnings(m.encodedSize(count)); len(msgs) > 0 {
+		diags = append(diags, LintDiagnostic{
+			Rule:     LintRuleInterchangeBounds,
+			Severity: LintWarning,
+			Count:    len(msgs),
+			Message:  strings.Join(msgs, "; "),
+		})
+	}
+	if msg := m.minimapWarning(); msg != "" {
+		sev := LintWarning
+		if m.MinimapW <= 0 || m.MinimapH <= 0 {
+			sev = LintInfo
+		}
+		diags = append(diags, LintDiagnostic{Rule: LintRuleMinimap, Severity: sev, Count: 1, Message: msg})
+	}
+	return diags
+}
+
+// cellName formats grid index i of a grid w wide as "x,y".
+func cellName(i, w int) string {
+	if w <= 0 {
+		return fmt.Sprint(i)
+	}
+	return fmt.Sprintf("%d,%d", i%w, i/w)
 }
 
 // clone returns a deep copy of m suitable for analysis without

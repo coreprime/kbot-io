@@ -238,3 +238,14 @@ func makeStarts(n int) []StartPos {
 	}
 	return out
 }
+
+func TestStartPositionsJustOffTheMapAreOutOfBounds(t *testing.T) {
+	for _, sp := range []StartPos{{Number: 1, X: -5, Z: 64}, {Number: 1, X: 64, Z: -1}} {
+		m := minimalMap()
+		ota := &OTAInfo{Schemas: []SchemaInfo{{StartPos: []StartPos{sp}}}}
+		d := CheckStartPositionsInBounds(Input{Map: m, OTA: ota})
+		if d.Severity != SeverityWarning || !strings.Contains(d.Message, "out of bounds") {
+			t.Fatalf("start (%d,%d): got %q (%s), want out of bounds", sp.X, sp.Z, d.Severity, d.Message)
+		}
+	}
+}

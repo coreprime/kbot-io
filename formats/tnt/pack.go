@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,11 +35,13 @@ type Metadata struct {
 type HeaderMetadata struct {
 	IDVersion uint32 `json:"id_version"`
 	SeaLevel  uint32 `json:"sea_level"`
-	Unknown1  uint32 `json:"unknown1"`
-	Pad1      uint32 `json:"pad1"`
-	Pad2      uint32 `json:"pad2"`
-	Pad3      uint32 `json:"pad3"`
-	Pad4      uint32 `json:"pad4"`
+	// Unknown1 is the 0x2c word, the minimap presence flags. Save sets or
+	// clears its bit 0 (MinimapPresent) from whether minimap.png is packed.
+	Unknown1 uint32 `json:"unknown1"`
+	Pad1     uint32 `json:"pad1"`
+	Pad2     uint32 `json:"pad2"`
+	Pad3     uint32 `json:"pad3"`
+	Pad4     uint32 `json:"pad4"`
 }
 
 // MinimapMetadata records the minimap dimensions for round-trip.
@@ -47,8 +50,9 @@ type MinimapMetadata struct {
 	Height int `json:"height"`
 }
 
-// FeatureMarker records a cell whose feature column holds a non-placement
-// sentinel value (commonly 0xFFFE "void" or 0xFFFC seen on early maps).
+// FeatureMarker records a cell whose feature column holds a word that places
+// no feature and is not FeatureNone: a sentinel (commonly 0xFFFC or 0xFFFE)
+// or an index beyond the feature table.
 type FeatureMarker struct {
 	X     int    `json:"x"`
 	Y     int    `json:"y"`
@@ -81,7 +85,8 @@ func Unpack(m *Map, features []Feature, palette color.Palette, dir string) error
 //	minimap.png        paletted PNG of the embedded minimap
 //	tiles/<n>.png      paletted 32x32 PNG per unique tile
 //	tilemap.csv        2D grid of tile indices
-//	features.csv       feature_index,name,attr_x,attr_y per placement
+//	features.csv       feature_index,name,attr_x,attr_y per placement (words
+//	                   that place no feature go to metadata.json instead)
 //	metadata.json      header constants + feature table + round-trip info
 //
 // dir is created if missing.
@@ -163,10 +168,13 @@ func UnpackWithOptions(m *Map, features []Feature, palette color.Palette, dir st
 	if len(m.MapDataPad) > 0 {
 		meta.MapDataPadB64 = base64.StdEncoding.EncodeToString(m.MapDataPad)
 	}
+	// Every word that is neither empty nor a placement (sentinels, and
+	// indices beyond the feature table, which the game ignores) is kept
+	// verbatim here rather than in features.csv.
 	for y := 0; y < m.AttrH; y++ {
 		for x := 0; x < m.AttrW; x++ {
 			v := m.TileAttr[y*m.AttrW+x].Feature
-			if v == 0xFFFF || int(v) < len(features) {
+			if v == FeatureNone || PlacesFeature(v, len(features)) {
 				continue
 			}
 			meta.FeatureSentinels = append(meta.FeatureSentinels, FeatureMarker{X: x, Y: y, Value: v})
@@ -183,9 +191,27 @@ func UnpackWithOptions(m *Map, features []Feature, palette color.Palette, dir st
 	return nil
 }
 
+// PackOptions tunes PackWithOptions.
+type PackOptions struct {
+	// AllowUnresolvedIndices accepts tilemap.csv indices at or beyond the
+	// number of tiles/<n>.png files, as SaveOptions.AllowUnresolvedIndices
+	// does for Save.
+	AllowUnresolvedIndices bool
+}
+
 // Pack reads a directory written by Unpack and reconstructs the Map + Feature
 // table.  Callers can then call Map.Save to write out a fresh TNT.
+//
+// Pack refuses a tilemap.csv value outside 0..65535 or not below the number
+// of tile files, a features.csv index outside the feature table, and a
+// feature table of FeatureSentinelFloor or more names. PackWithOptions can
+// allow tile indices beyond the tile set.
 func Pack(dir string) (*Map, []Feature, error) {
+	return PackWithOptions(dir, PackOptions{})
+}
+
+// PackWithOptions is Pack with options.
+func PackWithOptions(dir string, opts PackOptions) (*Map, []Feature, error) {
 	metaPath := filepath.Join(dir, "metadata.json")
 	metaBytes, err := os.ReadFile(metaPath)
 	if err != nil {
@@ -216,6 +242,11 @@ func Pack(dir string) (*Map, []Feature, error) {
 	if tileW*2 != attrW || tileH*2 != attrH {
 		return nil, nil, fmt.Errorf("tilemap (%dx%d) does not match heightmap (%dx%d)", tileW, tileH, attrW, attrH)
 	}
+	tiles, err := readTilesDir(filepath.Join(dir, "tiles"))
+	if err != nil {
+		return nil, nil, err
+	}
+
 	tileMap := make([]uint16, tileW*tileH)
 	for y, row := range tileRows {
 		if len(row) != tileW {
@@ -226,13 +257,14 @@ func Pack(dir string) (*Map, []Feature, error) {
 			if perr != nil {
 				return nil, nil, fmt.Errorf("tilemap.csv [%d,%d] not numeric: %q", x, y, cell)
 			}
+			if v < 0 || v > math.MaxUint16 {
+				return nil, nil, fmt.Errorf("tilemap.csv [%d,%d] = %d is not a 16-bit tile index", x, y, v)
+			}
+			if v >= len(tiles) && !opts.AllowUnresolvedIndices {
+				return nil, nil, fmt.Errorf("tilemap.csv [%d,%d] = %d but there are only %d tiles", x, y, v, len(tiles))
+			}
 			tileMap[y*tileW+x] = uint16(v)
 		}
-	}
-
-	tiles, err := readTilesDir(filepath.Join(dir, "tiles"))
-	if err != nil {
-		return nil, nil, err
 	}
 
 	attrs := make([]TileAttr, attrW*attrH)
@@ -267,12 +299,20 @@ func Pack(dir string) (*Map, []Feature, error) {
 		}
 		featureNames = discovered
 	}
+	if len(featureNames) >= int(FeatureSentinelFloor) {
+		return nil, nil, fmt.Errorf("%d feature names: the table must hold fewer than %d", len(featureNames), FeatureSentinelFloor)
+	}
 	if err := applyFeaturesCSV(filepath.Join(dir, "features.csv"), attrs, attrW, attrH, featureNames, lossy); err != nil {
 		return nil, nil, err
 	}
 	for _, s := range meta.FeatureSentinels {
 		if s.X < 0 || s.X >= attrW || s.Y < 0 || s.Y >= attrH {
 			return nil, nil, fmt.Errorf("feature_sentinels: (%d,%d) outside %dx%d grid", s.X, s.Y, attrW, attrH)
+		}
+		if lossy && PlacesFeature(s.Value, len(featureNames)) {
+			// A word that placed nothing in the original table would
+			// name an entry of the rebuilt one; keep the cell empty.
+			continue
 		}
 		attrs[s.Y*attrW+s.X].Feature = s.Value
 	}
@@ -317,6 +357,8 @@ func Pack(dir string) (*Map, []Feature, error) {
 	m := &Map{
 		Header: Header{
 			IDVersion: idv,
+			Tiles:     uint32(len(tiles)),
+			TileAnims: uint32(len(featureNames)),
 			SeaLevel:  meta.Header.SeaLevel,
 			Unknown1:  meta.Header.Unknown1,
 			Pad1:      meta.Header.Pad1,
@@ -476,11 +518,8 @@ func writeFeaturesCSV(path string, m *Map, features []Feature) error {
 	if err := w.Write([]string{"feature_index", "name", "attr_x", "attr_y"}); err != nil {
 		return err
 	}
-	for _, p := range m.GetFeaturePlacements() {
-		name := ""
-		if p.FeatureIdx < len(features) {
-			name = features[p.FeatureIdx].Name
-		}
+	for _, p := range m.FeaturePlacementsFor(len(features)) {
+		name := features[p.FeatureIdx].Name
 		if err := w.Write([]string{
 			strconv.Itoa(p.FeatureIdx),
 			name,
@@ -537,6 +576,9 @@ func readTilesDir(dir string) ([][]byte, error) {
 		return nil, fmt.Errorf("no <n>.png tile files in %s", dir)
 	}
 	sort.Slice(found, func(i, j int) bool { return found[i].idx < found[j].idx })
+	if found[0].idx < 0 || found[len(found)-1].idx >= MaxTiles {
+		return nil, fmt.Errorf("tile files in %s must be numbered 0..%d", dir, MaxTiles-1)
+	}
 	tiles := make([][]byte, found[len(found)-1].idx+1)
 	for _, t := range found {
 		img, derr := decodePNGFile(t.path)
@@ -611,7 +653,7 @@ func applyFeaturesCSV(path string, attrs []TileAttr, attrW, attrH int, featureNa
 			if ierr != nil {
 				return fmt.Errorf("features.csv row %d feature_index not numeric: %q", ri, row[0])
 			}
-			if len(featureNames) > 0 && (n < 0 || n >= len(featureNames)) {
+			if n < 0 || n >= len(featureNames) {
 				return fmt.Errorf("features.csv row %d feature_index %d out of range (table has %d entries)", ri, n, len(featureNames))
 			}
 			idx = n
