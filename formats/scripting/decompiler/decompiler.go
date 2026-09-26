@@ -13,8 +13,9 @@ import (
 // Decompiler converts COB bytecode to BOS source or disassembly
 type Decompiler struct {
 	cob *scripting.COB
-	// err is the first problem translateInstruction met in the script
-	// being decompiled (an instruction with no BOS form).
+	// err is the first reason the script being decompiled cannot be
+	// written as BOS (an instruction with no BOS form or a jump that is not
+	// part of an if, else or while block).
 	err error
 }
 
@@ -1282,12 +1283,11 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		}
 		return "return;"
 
-	case scripting.OP_JUMP: // 0x82
-		// Control flow - can't easily reconstruct without CFG analysis
-		return ""
-
-	case scripting.OP_JUMP_IF_FALSE: // 0x83
-		stack.pop() // Pop condition (will be reconstructed in if statement)
+	case scripting.OP_JUMP, scripting.OP_JUMP_IF_FALSE:
+		// Jumps that form if, else and while blocks are consumed by the
+		// control-flow analyser; one that reaches here has no BOS form.
+		d.fail("%s at 0x%04X to 0x%04X is not part of an if, else or while block; use the disassembler",
+			inst.Mnemonic(), inst.Offset, uint64(uint32(inst.Operand))*4)
 		return ""
 
 	case scripting.OP_STACK_ALLOC:
@@ -1302,14 +1302,20 @@ func (d *Decompiler) translateInstruction(inst scripting.Instruction, stack *exp
 		// No BOS form: an instruction no game runs, or a PUSH/POP whose
 		// flag bits the game refuses. Decompiling past it would print BOS
 		// that compiles to different code, so stop.
-		if d.err == nil {
-			d.err = fmt.Errorf("instruction %s (0x%08X) at 0x%04X has no BOS form; use the disassembler",
-				inst.Mnemonic(), inst.Word(), inst.Offset)
-		}
+		d.fail("instruction %s (0x%08X) at 0x%04X has no BOS form; use the disassembler",
+			inst.Mnemonic(), inst.Word(), inst.Offset)
 		return ""
 	}
 
 	return ""
+}
+
+// fail records the first reason the script being decompiled cannot be
+// written as BOS.
+func (d *Decompiler) fail(format string, args ...any) {
+	if d.err == nil {
+		d.err = fmt.Errorf(format, args...)
+	}
 }
 
 // angleValue writes an integer constant as a <degrees> literal; any other
@@ -1395,6 +1401,17 @@ func (s *exprStack) pop() string {
 
 func (s *exprStack) isEmpty() bool {
 	return len(s.items) == 0
+}
+
+// snapshot returns a copy of the stack for restore.
+func (s *exprStack) snapshot() exprStack {
+	return exprStack{items: append([]string(nil), s.items...), underflows: s.underflows}
+}
+
+// restore puts back a stack saved by snapshot.
+func (s *exprStack) restore(saved exprStack) {
+	s.items = saved.items
+	s.underflows = saved.underflows
 }
 
 // expressionHasSideEffect reports whether an expression on the symbolic

@@ -193,3 +193,140 @@ func TestDecompileUsesPlaceholderForBadScriptNames(t *testing.T) {
 		t.Errorf("BOS:\n%s", bos)
 	}
 }
+
+func TestDecompileRebuildsElseBlocks(t *testing.T) {
+	src := `piece base;
+static-var s;
+Create()
+{
+	var x;
+	if (s == 1)
+	{
+		x = 2;
+	}
+	else
+	{
+		x = 3;
+	}
+	while (x < 9)
+	{
+		if (s == 2)
+		{
+			x = x + 1;
+		}
+		else
+		{
+			if (s == 3)
+			{
+				x = x + 2;
+			}
+			else
+			{
+			}
+		}
+	}
+	if (s == 4)
+	{
+		if (s == 5)
+		{
+			x = 5;
+		}
+		else
+		{
+		}
+	}
+	else
+	{
+		x = 6;
+	}
+	if (s == 6)
+	{
+		if (s == 7)
+		{
+			x = 7;
+		}
+		else
+		{
+		}
+	}
+	return x;
+}
+`
+	cob, err := compiler.NewCompiler(src).Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bos := roundTrip(t, cob, "else")
+	if n := strings.Count(bos, "else"); n != 6 {
+		t.Errorf("BOS has %d else blocks, want 6:\n%s", n, bos)
+	}
+}
+
+func TestDecompileRefusesJumpsOutsideBlocks(t *testing.T) {
+	for name, body := range map[string]string{
+		// A forward goto: dropping it would run the skipped statements.
+		"forward JUMP": `0000  STACK_ALLOC
+0004  PUSH_CONST           1
+000C  PUSH_CONST           2
+0014  ADD
+0018  POP_LOCAL            0
+0020  JUMP                 14
+0028  PUSH_CONST           5
+0030  POP_LOCAL            0
+0038  PUSH_CONST           3
+0040  POP_LOCAL            0
+0048  PUSH_LOCAL           0
+0050  RETURN
+`,
+		"forward JUMP, low-bit variant": `0000  STACK_ALLOC
+0004  PUSH_CONST           1
+000C  POP_LOCAL            0
+0014  JUMP@0x10064001      10
+001C  PUSH_CONST           5
+0024  POP_LOCAL            0
+002C  PUSH_LOCAL           0
+0034  RETURN
+`,
+		"backward JUMP without a condition": `0000  STACK_ALLOC
+0004  PUSH_CONST           1
+000C  POP_LOCAL            0
+0014  JUMP                 1
+001C  PUSH_CONST           0
+0024  RETURN
+`,
+		"loop JUMP before its condition": `0000  STACK_ALLOC
+0004  PUSH_LOCAL           0
+000C  JUMP_IF_FALSE        7
+0014  JUMP                 0
+001C  PUSH_CONST           0
+0024  RETURN
+`,
+		"JUMP_IF_FALSE out of its loop": `0000  STACK_ALLOC
+0004  PUSH_LOCAL           0
+000C  JUMP_IF_FALSE        15
+0014  PUSH_LOCAL           0
+001C  JUMP_IF_FALSE        17
+0024  PUSH_CONST           1
+002C  POP_LOCAL            0
+0034  JUMP                 1
+003C  PUSH_CONST           0
+0044  RETURN
+`,
+		"JUMP_IF_FALSE without a condition": `0000  STACK_ALLOC
+0004  PUSH_CONST           1
+000C  PUSH_CONST           2
+0014  POP_LOCAL            0
+001C  JUMP_IF_FALSE        9
+0024  PUSH_CONST           0
+002C  RETURN
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cob := assemble(t, ".version 4\n.script Create\n"+body)
+			bos, err := NewDecompiler(cob).Decompile()
+			if err == nil || !strings.Contains(err.Error(), "JUMP") {
+				t.Fatalf("err = %v, want a jump error instead of:\n%s", err, bos)
+			}
+		})
+	}
+}
