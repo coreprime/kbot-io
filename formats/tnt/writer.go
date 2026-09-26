@@ -267,12 +267,12 @@ func (m *Map) checkSave(features []Feature, opts SaveOptions) error {
 	}
 	if !opts.AllowUnresolvedIndices {
 		if n, first := m.countBadTileIndices(); n > 0 {
-			return fmt.Errorf("%d tile map cells reference tiles beyond the %d-tile set (first: index %d at tile %d,%d)",
-				n, len(m.Tiles), m.TileMap[first], first%m.TileW, first/m.TileW)
+			return fmt.Errorf("%d tile map cells reference tiles beyond the %d-tile set (first: index %d at tile %s)",
+				n, len(m.Tiles), m.TileMap[first], cellName(first, m.TileW))
 		}
 		if n, first := m.countUnresolvedFeatures(len(features)); n > 0 {
-			return fmt.Errorf("%d cells hold feature words beyond the %d-entry feature table (first: %d at cell %d,%d)",
-				n, len(features), m.TileAttr[first].Feature, first%m.AttrW, first/m.AttrW)
+			return fmt.Errorf("%d cells hold feature words beyond the %d-entry feature table (first: %d at cell %s)",
+				n, len(features), m.TileAttr[first].Feature, cellName(first, m.AttrW))
 		}
 	}
 
@@ -306,6 +306,16 @@ func (m *Map) encodedSize(n int) uint64 {
 // interchangeWarnings describes how a map of the given encoded size exceeds
 // the interchange bounds or carries a minimap the game does not show.
 func (m *Map) interchangeWarnings(size uint64) []string {
+	out := m.boundsWarnings(size)
+	if msg := m.minimapWarning(); msg != "" {
+		out = append(out, msg)
+	}
+	return out
+}
+
+// boundsWarnings describes how a map of the given encoded size exceeds the
+// interchange bounds.
+func (m *Map) boundsWarnings(size uint64) []string {
 	var out []string
 	if m.AttrW > InterchangeMaxAttrSide || m.AttrH > InterchangeMaxAttrSide {
 		out = append(out, fmt.Sprintf("map is %dx%d attribute cells; some readers accept at most %d per side",
@@ -315,14 +325,20 @@ func (m *Map) interchangeWarnings(size uint64) []string {
 		out = append(out, fmt.Sprintf("map encodes to %d bytes; some readers accept at most %d",
 			size, InterchangeMaxFileSize))
 	}
+	return out
+}
+
+// minimapWarning describes a missing minimap or one the game's radar does
+// not use, or returns "".
+func (m *Map) minimapWarning() string {
 	switch {
 	case m.MinimapW <= 0 || m.MinimapH <= 0:
-		out = append(out, "map has no minimap; the game shows no preview and builds the radar picture from the tiles")
+		return "map has no minimap; the game shows no preview and builds the radar picture from the tiles"
 	case m.MinimapW < MinimapSize || m.MinimapH < MinimapSize:
-		out = append(out, fmt.Sprintf("minimap is %dx%d; the game's radar uses a stored minimap only when both sides are at least %d",
-			m.MinimapW, m.MinimapH, MinimapSize))
+		return fmt.Sprintf("minimap is %dx%d; the game's radar uses a stored minimap only when both sides are at least %d",
+			m.MinimapW, m.MinimapH, MinimapSize)
 	}
-	return out
+	return ""
 }
 
 // countBadTileIndices returns how many tile map cells reference a tile

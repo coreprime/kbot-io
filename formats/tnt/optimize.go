@@ -49,6 +49,10 @@ type OptimizeStats struct {
 //
 // The on-disk heightmap and feature placements are preserved verbatim;
 // only m.Tiles and m.TileMap are rewritten.
+//
+// Tile map cells whose index lies beyond the tile set are left unchanged
+// (they remain beyond the smaller set) and keep no tile in use; Lint reports
+// them as bad-tile-index, and Save refuses them unless told otherwise.
 func (m *Map) Optimize(opts OptimizeOptions) (OptimizeStats, error) {
 	stats := OptimizeStats{}
 	if m == nil {
@@ -58,6 +62,16 @@ func (m *Map) Optimize(opts OptimizeOptions) (OptimizeStats, error) {
 	if len(m.Tiles) == 0 {
 		stats.TilesAfter = 0
 		return stats, nil
+	}
+	if m.TileW < 0 || m.TileH < 0 || len(m.TileMap) != m.TileW*m.TileH ||
+		m.AttrW < m.TileW*2 || m.AttrH < m.TileH*2 || len(m.TileAttr) < m.AttrW*m.AttrH {
+		return stats, fmt.Errorf("optimize: inconsistent grids: tile %dx%d (%d entries), attr %dx%d (%d entries)",
+			m.TileW, m.TileH, len(m.TileMap), m.AttrW, m.AttrH, len(m.TileAttr))
+	}
+	for i, t := range m.Tiles {
+		if len(t) != TileGfxSize {
+			return stats, fmt.Errorf("optimize: tile %d is %d bytes, expected %d", i, len(t), TileGfxSize)
+		}
 	}
 
 	stats.ExactMerges = m.mergeExactDuplicates(opts.Progress)
@@ -223,14 +237,12 @@ func (m *Map) removeUnusedTiles(progress io.Writer) int {
 	}
 	m.Tiles = newTiles
 	for i, ti := range m.TileMap {
-		ni := newIdx[int(ti)]
-		if ni < 0 {
-			// Defensive: a placement referenced a tile we just dropped.
-			// used[] is built from m.TileMap so this can only happen
-			// when TileMap holds out-of-range indices; clamp to 0.
-			ni = 0
+		if int(ti) >= len(newIdx) {
+			continue // beyond the tile set: left as is
 		}
-		m.TileMap[i] = uint16(ni)
+		// used[] marks every in-range index in m.TileMap, so none of
+		// them maps to a dropped tile.
+		m.TileMap[i] = uint16(newIdx[int(ti)])
 	}
 	return dropped
 }
@@ -309,6 +321,9 @@ func (m *Map) rewriteWithParent(parent []int) {
 	}
 	m.Tiles = newTiles
 	for i, ti := range m.TileMap {
+		if int(ti) >= len(newIdx) {
+			continue // beyond the tile set: left as is
+		}
 		m.TileMap[i] = uint16(newIdx[int(ti)])
 	}
 }
