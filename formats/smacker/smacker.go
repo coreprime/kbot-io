@@ -23,10 +23,11 @@ const (
 	AudioTrackCount = 7
 
 	// DefaultFrameRate is the rate, in frames per second, that FrameRate
-	// reports for a header whose frame-rate field is 0. That value has no
-	// defined timing in the header: FFmpeg rejects it, other Smacker
-	// decoders use 10 fps, and the rate TA 3.1c plays such a file at has not
-	// been established. The shipped TA movies all store -3333 (about 30 fps).
+	// reports and ConvertToMP4 uses for a header whose frame-rate field is
+	// 0. That value has no defined timing: FFmpeg cannot time it, other
+	// Smacker decoders use 10 fps, and the rate TA 3.1c plays such a file at
+	// has not been established. The shipped TA movies all store -3333
+	// (about 30 fps).
 	DefaultFrameRate = 15.0
 )
 
@@ -41,7 +42,7 @@ const (
 	FlagRingFrame = 0x01
 	// FlagInterlaced marks a movie the game shows at twice its stored
 	// height with every second line left black: stored line n is drawn on
-	// display line 2n and display line 2n+1 stays blank.
+	// display line 2n and display line 2n+1 stays black.
 	FlagInterlaced = 0x02
 	// FlagDoubled marks a movie the game shows at twice its stored height
 	// by drawing every stored line twice.
@@ -174,7 +175,8 @@ func (r *Reader) Width() int {
 	return int(r.header.Width)
 }
 
-// Height returns video height
+// Height returns the stored frame height. DisplayHeight gives the height
+// the game shows.
 func (r *Reader) Height() int {
 	return int(r.header.Height)
 }
