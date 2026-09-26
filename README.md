@@ -21,6 +21,21 @@ depend on the format code without pulling in the full CLI.
   TA:K texture palettes.
 - **`testutil/`** — test helpers for locating optional unpacked game assets.
 
+### GAF
+
+`formats/gaf` reads GAF files the way TA 3.1c does: the sequence count is the
+signed low 16 bits of its word, durations are 16-bit ticks at 30 per second,
+frame bytes +10 and +11 are a layer count and a separate blend flag, and any
+version word is accepted. Structures the game reads differently or cannot
+load (nested or shared frame headers, short compressed rows, odd header
+words) are reported by `Reader.Warnings`. The writer keeps each frame's raw
+or compressed storage, the sequence loop word and composite layers;
+`gaf.StorageForPath` names the archives the game needs raw (unit textures and
+sight masks). Palettes are fully opaque (index 0 is black); by default
+exports make only a raw frame's stored key, or a compressed frame's skipped
+pixels, transparent, and `TransparencyModeHeuristic` is available for TA:
+Kingdoms atlases. See the package documentation for the full rules.
+
 ## Usage
 
 ```go
