@@ -101,7 +101,12 @@
 // ';' in a value, a "//" in a URL or a ']' in a section name would change what
 // the game reads.
 //
-// # Rewriting
+// # Comparing and rewriting
+//
+// SemanticEqual reports whether two texts load the same data in the game: a
+// key present on one side only, a different order of sections or a change in
+// a value's case or spacing are differences. SemanticEqualWith can ignore some
+// of these.
 //
 // A rewrite by Marshal, Canonicalize or Document.Write normalises layout and
 // drops comments. The game hashes the raw bytes of some files (FBI files, and

@@ -2,7 +2,7 @@ package tdf
 
 import (
 	"fmt"
-	"strconv"
+	"sort"
 	"strings"
 )
 
@@ -180,14 +180,42 @@ func Canonicalize(data []byte) ([]byte, error) {
 	return []byte(b.String()), nil
 }
 
-// SemanticEqual reports whether two TDF documents are equivalent ignoring
-// comments, whitespace, key/section-name case, field ordering, and numeric
-// formatting (".6" == "0.60" == "0.6"). A field that is absent on one side is
-// treated as equal to a zero-valued field on the other (a missing numeric or
-// string key defaults to zero/empty in the engine), which lets `omitempty`
-// struct fields round-trip semantically. When the documents differ, the second
-// return value describes the first mismatch found.
+// CompareOptions loosens SemanticEqualWith. The zero value compares the way the
+// game loads the two texts.
+type CompareOptions struct {
+	// AbsentIsZero treats a key missing on one side as equal to an explicit
+	// zero or empty value on the other, and a section missing on one side as
+	// equal to one holding only such values. The game applies its own
+	// default to a missing key, which is often not zero, so this hides real
+	// differences; it suits comparisons against writers that drop zero
+	// values. It implies IgnoreSectionOrder.
+	AbsentIsZero bool
+	// IgnoreSectionOrder matches sections by name rather than by position.
+	// Readers that walk sections by index see a different order.
+	IgnoreSectionOrder bool
+	// FoldValueCase compares values ignoring ASCII case.
+	FoldValueCase bool
+	// CollapseSpace compares values with each run of separators reduced to
+	// one space.
+	CollapseSpace bool
+}
+
+// SemanticEqual reports whether two TDF texts load the same data in the game.
+// It ignores comments, formatting, the order of fields within a section, the
+// ASCII case of keys and section names, earlier assignments of a key that is
+// assigned again (the last one wins), and text after a stray '}' outside any
+// section. It does not ignore a key present on one side only, even when its
+// value is zero or empty, since the game applies a default to a missing key; the
+// order or number of sections; or the case or spacing of values. Two values
+// also match when both are plain numerals that read as the same number with
+// both Atol and Atof (".6" and "0.60", "1" and "1.0"). When the texts differ,
+// the second result describes the first difference found.
 func SemanticEqual(a, b []byte) (bool, string) {
+	return SemanticEqualWith(a, b, CompareOptions{})
+}
+
+// SemanticEqualWith is SemanticEqual with some differences ignored.
+func SemanticEqualWith(a, b []byte, opts CompareOptions) (bool, string) {
 	ea, err := parseDocument(a)
 	if err != nil {
 		return false, "parse a: " + err.Error()
@@ -196,88 +224,116 @@ func SemanticEqual(a, b []byte) (bool, string) {
 	if err != nil {
 		return false, "parse b: " + err.Error()
 	}
-	return elementsEqual(ea, eb, "")
+	if opts.AbsentIsZero {
+		opts.IgnoreSectionOrder = true
+	}
+	c := comparer{opts}
+	return c.elements(ea, eb, "")
 }
 
-func elementsEqual(a, b []*element, path string) (bool, string) {
+type comparer struct{ opts CompareOptions }
+
+func (c comparer) elements(a, b []*element, path string) (bool, string) {
 	fieldsA, sectionsA := group(a)
 	fieldsB, sectionsB := group(b)
 
-	for k, va := range fieldsA {
+	for _, k := range sortedKeys(fieldsA) {
+		va := fieldsA[k]
 		vb, ok := fieldsB[k]
 		if !ok {
-			if fieldListZeroish(va) {
+			if c.opts.AbsentIsZero && valueZeroish(va) {
 				continue
 			}
-			return false, fmt.Sprintf("%s.%s present only in a (%v)", path, k, va)
+			return false, fmt.Sprintf("%s.%s present only in a (%q)", path, k, va)
 		}
-		if ok, msg := fieldListEqual(va, vb, path+"."+k); !ok {
-			return false, msg
+		if !c.valueEqual(va, vb) {
+			return false, fmt.Sprintf("%s.%s: %q vs %q", path, k, va, vb)
 		}
 	}
-	for k, vb := range fieldsB {
+	for _, k := range sortedKeys(fieldsB) {
 		if _, ok := fieldsA[k]; ok {
 			continue
 		}
-		if !fieldListZeroish(vb) {
-			return false, fmt.Sprintf("%s.%s present only in b (%v)", path, k, vb)
+		if c.opts.AbsentIsZero && valueZeroish(fieldsB[k]) {
+			continue
 		}
+		return false, fmt.Sprintf("%s.%s present only in b (%q)", path, k, fieldsB[k])
 	}
 
-	for k, sa := range sectionsA {
-		sb := sectionsB[k]
-		if ok, msg := sectionListEqual(sa, sb, path+"/"+k); !ok {
+	if !c.opts.IgnoreSectionOrder {
+		if len(sectionsA) != len(sectionsB) {
+			return false, fmt.Sprintf("%s: %d vs %d sections", path, len(sectionsA), len(sectionsB))
+		}
+		for i := range sectionsA {
+			sa, sb := sectionsA[i], sectionsB[i]
+			if !equalFold(sa.key, sb.key) {
+				return false, fmt.Sprintf("%s: section %d is [%s] vs [%s]", path, i, sa.key, sb.key)
+			}
+			if ok, msg := c.elements(sa.children, sb.children, path+"/"+foldKey(sa.key)); !ok {
+				return false, msg
+			}
+		}
+		return true, ""
+	}
+
+	byNameA, byNameB := byName(sectionsA), byName(sectionsB)
+	for _, k := range sortedKeys(byNameA) {
+		if ok, msg := c.sectionList(byNameA[k], byNameB[k], path+"/"+k); !ok {
 			return false, msg
 		}
 	}
-	for k, sb := range sectionsB {
-		if _, ok := sectionsA[k]; ok {
+	for _, k := range sortedKeys(byNameB) {
+		if _, ok := byNameA[k]; ok {
 			continue
 		}
-		if ok, msg := sectionListEqual(nil, sb, path+"/"+k); !ok {
+		if ok, msg := c.sectionList(nil, byNameB[k], path+"/"+k); !ok {
 			return false, msg
 		}
 	}
 	return true, ""
 }
 
-func group(els []*element) (fields map[string][]string, sections map[string][]*element) {
-	fields = map[string][]string{}
-	sections = map[string][]*element{}
+// group returns a section's effective field values (the last assignment of
+// each key, keys folded) and its child sections in order.
+func group(els []*element) (fields map[string]string, sections []*element) {
+	fields = map[string]string{}
 	for _, el := range els {
-		key := foldKey(el.key)
 		if el.section {
-			sections[key] = append(sections[key], el)
+			sections = append(sections, el)
 		} else {
-			fields[key] = append(fields[key], el.value)
+			fields[foldKey(el.key)] = el.value
 		}
 	}
 	return fields, sections
 }
 
-func fieldListEqual(a, b []string, path string) (bool, string) {
-	// TDF field assignment is last-wins: when a key is repeated within a
-	// section the engine keeps only the final value, so a typed struct that
-	// collapses duplicates to one field is semantically equivalent to the
-	// original. Compare the effective (last) value on each side.
-	la, lb := a[len(a)-1], b[len(b)-1]
-	if !valueEqual(la, lb) {
-		return false, fmt.Sprintf("%s: %q vs %q", path, la, lb)
+func byName(sections []*element) map[string][]*element {
+	out := map[string][]*element{}
+	for _, s := range sections {
+		k := foldKey(s.key)
+		out[k] = append(out[k], s)
 	}
-	return true, ""
+	return out
 }
 
-func sectionListEqual(a, b []*element, path string) (bool, string) {
-	// A section that exists on only one side is acceptable when it carries no
-	// meaningful (non-zero) data.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func (c comparer) sectionList(a, b []*element, path string) (bool, string) {
 	if len(a) == 0 || len(b) == 0 {
 		extra := a
 		if len(a) == 0 {
 			extra = b
 		}
 		for _, el := range extra {
-			if !sectionZeroish(el) {
-				return false, fmt.Sprintf("%s: section present on only one side with data", path)
+			if !c.opts.AbsentIsZero || !sectionZeroish(el) {
+				return false, fmt.Sprintf("%s: section present on only one side", path)
 			}
 		}
 		return true, ""
@@ -286,46 +342,36 @@ func sectionListEqual(a, b []*element, path string) (bool, string) {
 		return false, fmt.Sprintf("%s: %d vs %d sections", path, len(a), len(b))
 	}
 	for i := range a {
-		if ok, msg := elementsEqual(a[i].children, b[i].children, path); !ok {
+		if ok, msg := c.elements(a[i].children, b[i].children, path); !ok {
 			return false, msg
 		}
 	}
 	return true, ""
 }
 
-func valueEqual(a, b string) bool {
-	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
-	// Runs of whitespace between tokens are insignificant in TDF values
-	// (e.g. a space-delimited category list "WEAPON  NOTSUB"), so collapse
-	// them before comparing.
-	if strings.EqualFold(a, b) || strings.EqualFold(collapseSpaces(a), collapseSpaces(b)) {
+func (c comparer) valueEqual(a, b string) bool {
+	if a == b {
 		return true
 	}
-	fa, ea := strconv.ParseFloat(a, 64)
-	fb, eb := strconv.ParseFloat(b, 64)
-	return ea == nil && eb == nil && fa == fb
+	if c.opts.CollapseSpace {
+		a, b = collapseSpaces(a), collapseSpaces(b)
+	}
+	if c.opts.FoldValueCase {
+		if equalFold(a, b) {
+			return true
+		}
+	} else if a == b {
+		return true
+	}
+	return numeralsEqual(a, b)
 }
 
 func collapseSpaces(s string) string {
-	return strings.Join(strings.Fields(s), " ")
+	return strings.Join(strings.FieldsFunc(s, func(r rune) bool { return r < 0x80 && isSeparator(byte(r)) }), " ")
 }
 
 func valueZeroish(v string) bool {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return true
-	}
-	f, err := strconv.ParseFloat(v, 64)
-	return err == nil && f == 0
-}
-
-func fieldListZeroish(vs []string) bool {
-	for _, v := range vs {
-		if !valueZeroish(v) {
-			return false
-		}
-	}
-	return true
+	return v == "" || (isNumeral(v) && Atof(v) == 0)
 }
 
 func sectionZeroish(el *element) bool {

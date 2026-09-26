@@ -83,6 +83,7 @@ func TestSemanticEqualIgnoresFormatting(t *testing.T) {
 	{
 	BAZ = Hello World ;   /* trailing */
 	FOO = 0.60;
+	Bar = 0 ;
 	}`
 	if ok, msg := SemanticEqual([]byte(a), []byte(b)); !ok {
 		t.Errorf("expected equal: %s", msg)
