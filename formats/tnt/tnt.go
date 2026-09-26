@@ -31,7 +31,7 @@ const (
 // same 64-byte size but moves several fields: notably its minimap pointer
 // lands in the Unknown1 slot (offset 0x2c).
 type Header struct {
-	IDVersion   uint32 // 0x2000 (TA) or 0x4000 (TA:K)
+	IDVersion   uint32 // 0x2000 (TA), 0x1020 (older TA layout) or 0x4000 (TA:K)
 	Width       uint32 // TA: width in 16px attribute cells (tiles = Width/2). TA:K: width in 16px DataUnits.
 	Height      uint32 // TA: height in 16px attribute cells (tiles = Height/2). TA:K: height in 16px DataUnits.
 	PTRMapData  uint32 // TA: tile index array. TA:K: sea level.
@@ -265,7 +265,7 @@ func (m *Map) IsLegacy() bool { return m.Header.IDVersion == VersionLegacy }
 // whether the file stores a minimap: the word at 0x2c (Unknown1), or 0x3c
 // (Pad4) in a 0x1020 file. TA: Kingdoms files keep their minimap pointer in
 // the 0x2c slot and have no presence flags, so the result is 0 for them.
-func (h *Header) MinimapFlags() uint32 {
+func (h Header) MinimapFlags() uint32 {
 	switch h.IDVersion {
 	case VersionLegacy:
 		return h.Pad4

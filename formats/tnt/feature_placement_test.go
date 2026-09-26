@@ -162,3 +162,44 @@ func TestUnpackPackKeepsDanglingFeatureWords(t *testing.T) {
 		t.Fatal("packed map's build map shows no feature block")
 	}
 }
+
+// TestLossyPackDropsCollidingDanglingWords: in lossy mode Pack rebuilds the
+// feature table from the names in features.csv, so a word that placed
+// nothing in the original map could name an entry of the new table once
+// names are added. It must stay a non-placement.
+func TestLossyPackDropsCollidingDanglingWords(t *testing.T) {
+	m, feats := smallMap() // table [rock1], placed at cell 5
+	m.TileAttr[6].Feature = 2
+	m.TileAttr[7].Feature = 0x9000
+	m.Header.TileAnims = 1
+	dir := t.TempDir()
+	if err := UnpackWithOptions(m, feats, greyPalette(), dir, UnpackOptions{Lossless: false}); err != nil {
+		t.Fatal(err)
+	}
+	// Add two new feature names, growing the rebuilt table to 3 entries.
+	f, err := os.OpenFile(filepath.Join(dir, "features.csv"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("0,tree1,0,0\n0,tree2,3,3\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	got, gotFeats, err := Pack(dir)
+	if err != nil {
+		t.Fatalf("Pack: %v", err)
+	}
+	if len(gotFeats) != 3 {
+		t.Fatalf("rebuilt table has %d names, want 3", len(gotFeats))
+	}
+	if got.TileAttr[6].Feature != FeatureNone {
+		t.Fatalf("dangling word 2 became %#x, want FeatureNone", got.TileAttr[6].Feature)
+	}
+	if got.TileAttr[7].Feature != 0x9000 {
+		t.Fatalf("non-colliding word = %#x, want 0x9000", got.TileAttr[7].Feature)
+	}
+	if n := len(got.GetFeaturePlacements()); n != 3 {
+		t.Fatalf("%d placements, want 3", n)
+	}
+}

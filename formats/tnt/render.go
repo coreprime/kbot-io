@@ -217,7 +217,8 @@ func (m *Map) RenderBuildMap(seaLevel uint32) *image.RGBA {
 // RenderBuildMapFor is RenderBuildMap for a feature table of featureCount
 // entries: a cell is feature-blocked when its word places one of them (see
 // PlacesFeature). A negative featureCount means the table size is unknown,
-// and every word below the sentinel floor then counts as a feature.
+// and every word below the sentinel floor then counts as a feature; for a TA:
+// Kingdoms map it means Header.TileAnims.
 func (m *Map) RenderBuildMapFor(seaLevel uint32, featureCount int) *image.RGBA {
 	if m.IsTAK {
 		return m.renderTAKBuildMap(seaLevel, featureCount)

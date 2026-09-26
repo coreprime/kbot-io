@@ -246,9 +246,6 @@ func PackWithOptions(dir string, opts PackOptions) (*Map, []Feature, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(tiles) > MaxTiles {
-		return nil, nil, fmt.Errorf("%d tile files: 16-bit tile indices address at most %d", len(tiles), MaxTiles)
-	}
 
 	tileMap := make([]uint16, tileW*tileH)
 	for y, row := range tileRows {
@@ -311,6 +308,11 @@ func PackWithOptions(dir string, opts PackOptions) (*Map, []Feature, error) {
 	for _, s := range meta.FeatureSentinels {
 		if s.X < 0 || s.X >= attrW || s.Y < 0 || s.Y >= attrH {
 			return nil, nil, fmt.Errorf("feature_sentinels: (%d,%d) outside %dx%d grid", s.X, s.Y, attrW, attrH)
+		}
+		if lossy && PlacesFeature(s.Value, len(featureNames)) {
+			// A word that placed nothing in the original table would
+			// name an entry of the rebuilt one; keep the cell empty.
+			continue
 		}
 		attrs[s.Y*attrW+s.X].Feature = s.Value
 	}
