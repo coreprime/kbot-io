@@ -17,6 +17,37 @@
 // This package can parse and re-emit both forms byte-for-byte, decompile a
 // binary TAF into a TSF document plus extracted layer images, and compile a
 // TSF document plus its images back into a binary TAF.
+//
+// # TSF text
+//
+// [ParseTSF] reads sections written as a "[Name]" line, a "{" line and a "}"
+// line, holding "Key = Value;" assignments (one per line; the value ends at
+// the first ';') and nested sections. "//" and "/* */" comments and blank
+// lines may appear anywhere, including between top-level sections.
+// [Document.String] reproduces a parsed file byte for byte, including
+// indentation, comments and mixed line endings; only nodes that were changed
+// or added are written in the canonical layout.
+//
+// # Images
+//
+// Layer images are PNG or JPEG files decoded with Go's image/png and
+// image/jpeg, limited to [MaxImagePixels] and read only from inside the
+// resolver's directory. PNG import follows the PNG specification strictly and
+// differs from the PNG loader TA 3.1c uses for the images in its Boneyards
+// markup pages. Go rejects files that loader shows: 16-bit palette images, a
+// palette whose length is any multiple of 3 (including one on a greyscale
+// image), ancillary chunks with bad checksums, a PLTE or tRNS chunk after the
+// image data, and an IEND chunk that carries data. Go also skips chunks that
+// stop that loader: an unknown critical chunk, a chunk type with bytes outside
+// A-Z and a-z, and a known ancillary chunk before IHDR.
+//
+// The PNGs this package writes are specification-conforming truecolour images
+// with alpha. That loader draws each sample byte as a game palette index,
+// ignoring PLTE, tRNS and the colour type, and does not decode images over 256
+// pixels on a side, so these files do not display as authored in the game's
+// markup pages. Only 8-bit palette or greyscale PNGs holding TA palette
+// indices, with palette entry 0 black (otherwise the loader inverts the
+// indices) and no reliance on transparency, do.
 package tsf
 
 import (
