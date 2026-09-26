@@ -41,7 +41,20 @@ type Section struct {
 	Minimap   []byte       // 128×128 palette indices
 }
 
-// LoadFromReader parses an SCT file from the given reader.
+// tileBytes is the size of one 32×32 tile graphic.
+const tileBytes = 32 * 32
+
+// minimapBytes is the size of the 128×128 minimap.
+const minimapBytes = 128 * 128
+
+// LoadFromReader parses an SCT file from the given reader. Header pointers are
+// absolute stream offsets.
+//
+// The stream is sized first and every table the header describes (tile
+// graphics, tile map and height table) is checked against it before anything
+// is allocated, so a corrupt header fails with an error instead of a huge
+// allocation. A tile map or height table that runs past the end of the file is
+// an error; a missing or truncated minimap leaves Minimap nil.
 func LoadFromReader(r io.ReadSeeker) (*Section, error) {
 	s := &Section{}
 
@@ -52,26 +65,58 @@ func LoadFromReader(r io.ReadSeeker) (*Section, error) {
 	if s.Header.Version != 2 && s.Header.Version != 3 {
 		return nil, fmt.Errorf("unsupported SCT version: %d (expected 2 or 3)", s.Header.Version)
 	}
+	end, err := r.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to size SCT stream: %w", err)
+	}
+	size := uint64(end)
+	h := s.Header
+
+	// Size every table in 64 bits and check it against the file.
+	cells := uint64(h.Width) * uint64(h.Height)
+	if cells > size/2 {
+		return nil, fmt.Errorf("section of %dx%d tiles needs a larger tile map than the %d-byte file holds",
+			h.Width, h.Height, size)
+	}
+	entrySize := uint64(4) // V3: 4 bytes per height entry, V2: 8
+	if h.Version == 2 {
+		entrySize = 8
+	}
+	graphics := uint64(h.NumTiles) * tileBytes
+	tileMap := cells * 2
+	heights := cells * 4 * entrySize
+	for _, sec := range []struct {
+		name   string
+		off, n uint64
+	}{
+		{"tile graphics", uint64(h.PtrTiles), graphics},
+		{"tile map", uint64(h.PtrData), tileMap},
+		{"height table", uint64(h.PtrData) + tileMap, heights},
+	} {
+		if sec.off > size || sec.n > size-sec.off {
+			return nil, fmt.Errorf("%s (%d bytes at 0x%X) runs past the end of the %d-byte file",
+				sec.name, sec.n, sec.off, size)
+		}
+	}
 
 	// Read tiles.
-	if _, err := r.Seek(int64(s.Header.PtrTiles), io.SeekStart); err != nil {
+	if _, err := r.Seek(int64(h.PtrTiles), io.SeekStart); err != nil {
 		return nil, fmt.Errorf("failed to seek to tiles: %w", err)
 	}
-	s.Tiles = make([][]byte, s.Header.NumTiles)
-	for i := uint32(0); i < s.Header.NumTiles; i++ {
-		tile := make([]byte, 1024) // 32×32
-		if _, err := io.ReadFull(r, tile); err != nil {
-			return nil, fmt.Errorf("failed to read tile %d: %w", i, err)
-		}
-		s.Tiles[i] = tile
+	pixels := make([]byte, graphics)
+	if _, err := io.ReadFull(r, pixels); err != nil {
+		return nil, fmt.Errorf("failed to read tiles: %w", err)
+	}
+	s.Tiles = make([][]byte, h.NumTiles)
+	for i := range s.Tiles {
+		s.Tiles[i] = pixels[i*tileBytes : (i+1)*tileBytes : (i+1)*tileBytes]
 	}
 
 	// Read section data (tile indices).
-	if _, err := r.Seek(int64(s.Header.PtrData), io.SeekStart); err != nil {
+	if _, err := r.Seek(int64(h.PtrData), io.SeekStart); err != nil {
 		return nil, fmt.Errorf("failed to seek to section data: %w", err)
 	}
-	tileCount := int(s.Header.Width * s.Header.Height)
-	s.TileMap = make([]int16, tileCount)
+	s.TileMap = make([]int16, cells)
 	if err := binary.Read(r, binary.LittleEndian, s.TileMap); err != nil {
 		return nil, fmt.Errorf("failed to read tile map: %w", err)
 	}
@@ -79,28 +124,21 @@ func LoadFromReader(r io.ReadSeeker) (*Section, error) {
 	// Read height/attribute data.
 	// The attribute grid is Width*2 × Height*2 (16px resolution).
 	// Height data follows immediately after the tile map.
-	// V3: 4 bytes per entry, V2: 8 bytes per entry.
-	s.AttrW = int(s.Header.Width) * 2
-	s.AttrH = int(s.Header.Height) * 2
-	attrCount := s.AttrW * s.AttrH
-	entrySize := 4
-	if s.Header.Version == 2 {
-		entrySize = 8
+	s.AttrW = int(h.Width) * 2
+	s.AttrH = int(h.Height) * 2
+	raw := make([]byte, heights)
+	if _, err := io.ReadFull(r, raw); err != nil {
+		return nil, fmt.Errorf("failed to read height table: %w", err)
 	}
-	s.HeightMap = make([]HeightData, attrCount)
-	for i := 0; i < attrCount; i++ {
-		entry := make([]byte, entrySize)
-		if _, err := io.ReadFull(r, entry); err != nil {
-			s.HeightMap = nil
-			break
-		}
-		s.HeightMap[i] = HeightData{Height: entry[0]}
+	s.HeightMap = make([]HeightData, cells*4)
+	for i := range s.HeightMap {
+		s.HeightMap[i] = HeightData{Height: raw[uint64(i)*entrySize]}
 	}
 
 	// Read minimap.
-	if s.Header.PtrMinimap > 0 {
-		if _, err := r.Seek(int64(s.Header.PtrMinimap), io.SeekStart); err == nil {
-			minimap := make([]byte, 128*128)
+	if h.PtrMinimap > 0 && uint64(h.PtrMinimap)+minimapBytes <= size {
+		if _, err := r.Seek(int64(h.PtrMinimap), io.SeekStart); err == nil {
+			minimap := make([]byte, minimapBytes)
 			if _, err := io.ReadFull(r, minimap); err == nil {
 				s.Minimap = minimap
 			}
@@ -118,8 +156,12 @@ func (s *Section) RenderTileMap(palette color.Palette) *image.RGBA {
 
 	for ty := 0; ty < int(s.Header.Height); ty++ {
 		for tx := 0; tx < int(s.Header.Width); tx++ {
-			tileIdx := s.TileMap[ty*int(s.Header.Width)+tx]
-			if tileIdx < 0 || int(tileIdx) >= len(s.Tiles) {
+			cell := ty*int(s.Header.Width) + tx
+			if cell >= len(s.TileMap) {
+				continue
+			}
+			tileIdx := s.TileMap[cell]
+			if tileIdx < 0 || int(tileIdx) >= len(s.Tiles) || len(s.Tiles[tileIdx]) < tileBytes {
 				continue
 			}
 			tile := s.Tiles[tileIdx]
@@ -177,7 +219,7 @@ func (s *Section) RenderHeightMap() *image.Gray {
 
 // RenderMinimap renders the minimap as an RGBA image using the given palette.
 func (s *Section) RenderMinimap(palette color.Palette) *image.RGBA {
-	if s.Minimap == nil {
+	if len(s.Minimap) < minimapBytes {
 		return nil
 	}
 	img := image.NewRGBA(image.Rect(0, 0, 128, 128))
