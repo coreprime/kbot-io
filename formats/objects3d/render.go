@@ -12,9 +12,13 @@ import (
 // asset store (GAF textures + palette). The rasteriser stays VFS/GAF-agnostic;
 // this is the boundary the studio implements against its session.
 type Material interface {
-	// Texture returns the decoded texture image for a 3DO texture name.
+	// Texture returns the decoded texture image for a 3DO texture name, and
+	// false when the name does not resolve. The game looks texture names up
+	// case-insensitively and fills a primitive whose texture is missing with
+	// palette index MissingTextureColor.
 	Texture(name string) (*image.RGBA, bool)
-	// PaletteColor returns the RGBA for a colour-keyed primitive's index.
+	// PaletteColor returns the RGBA for a palette index (0..255): a coloured
+	// primitive's ColorIndex, or MissingTextureColor.
 	PaletteColor(index int) (color.RGBA, bool)
 }
 
@@ -30,8 +34,12 @@ type RenderOptions struct {
 	Gain          float64 // brightness multiplier applied after shading
 	LightDir      [3]float64
 	Background    color.Color // nil = transparent
-	Base          color.Color // fallback colour for untextured/unresolved faces
-	Material      Material    // optional texture/palette source
+	// Base is the colour of faces the renderer cannot resolve further: every
+	// drawn face when Material is nil, filled faces whose palette index the
+	// Material does not resolve, and textured faces whose texture image is
+	// nil.
+	Base     color.Color
+	Material Material // optional texture/palette source
 	// FitToFrame scales the model to fill the frame (for large hover previews)
 	// instead of rendering at true scale.
 	FitToFrame bool
@@ -39,9 +47,29 @@ type RenderOptions struct {
 	// 65536 units = 1px = 1/16th of a tile). Models render at this true scale,
 	// shrinking only if they would otherwise overflow the frame.
 	UnitsPerPixel float64
+	// CullBackFaces skips faces turned away from the camera, as the game
+	// does: a face is drawn only when the normal its corner order gives by
+	// the right-hand rule, in the file's coordinates, points toward the
+	// viewer. DefaultRenderOptions turns it on.
+	CullBackFaces bool
+	// HideBaseplates hides flat coloured quads in the bottom 12% of the
+	// model's height, a preview heuristic for footprint plates. The game
+	// draws those faces, so it is off by default.
+	HideBaseplates bool
+	// KeyedTextures skips texels whose alpha is 0, for hosts whose model
+	// textures carry a transparency key (TA: Kingdoms). TA 3.1c samples
+	// model textures without a key and draws every texel, so leave it off
+	// for TA.
+	KeyedTextures bool
+	// TexturePolygons textures uncoloured primitives of any corner count
+	// from three up. TA 3.1c textures only four-corner primitives and draws
+	// nothing for other textured ones, so leave it off for TA; TA: Kingdoms
+	// models carry many textured triangles, so turn it on for them.
+	TexturePolygons bool
 }
 
-// DefaultRenderOptions returns a TA-style steep top-down preview at true scale.
+// DefaultRenderOptions returns a TA-style steep top-down preview at true scale,
+// with back faces culled as in the game.
 func DefaultRenderOptions() RenderOptions {
 	return RenderOptions{
 		Width: 128, Height: 128,
@@ -51,10 +79,24 @@ func DefaultRenderOptions() RenderOptions {
 		Gain:          1.25,
 		LightDir:      [3]float64{-0.3, 0.9, 0.55},
 		Background:    nil,
-		Base:          color.RGBA{0xb6, 0xbc, 0xc6, 0xff},
+		Base:          defaultBase,
 		UnitsPerPixel: 65536,
+		CullBackFaces: true,
 	}
 }
+
+// defaultBase is the fallback face colour.
+var defaultBase = color.RGBA{0xb6, 0xbc, 0xc6, 0xff}
+
+// edgeEpsilon widens the triangle inside test (in square pixels) so a pixel
+// centre on the edge shared by two triangles of one face is never left out of
+// both by rounding.
+const edgeEpsilon = 1e-6
+
+// depthTieTolerance is the depth difference, in 3DO units, under which two
+// fragments count as coplanar; the later-drawn one then wins, as in the game's
+// painter's order. One unit is 1/65536 of a pixel.
+const depthTieTolerance = 1.0
 
 // rtri is a renderable triangle: world-space verts, per-vertex UVs, and either a
 // texture (sampled per pixel) or a flat colour.
@@ -136,7 +178,8 @@ func fitScale(tris []rtri, c vec3, opts RenderOptions) float64 {
 }
 
 // renderFrame rasterises one frame: rotate about the centroid, project with the
-// fixed scale, per-pixel z-buffer + (textured or flat) shading.
+// fixed scale, per-pixel z-buffer + (textured or flat) shading. Triangles
+// arrive in the game's draw order, and a later triangle wins a depth tie.
 func renderFrame(opts RenderOptions, tris []rtri, c vec3, az, el, scale float64) *image.RGBA {
 	W, H := opts.Width, opts.Height
 	img := image.NewRGBA(image.Rect(0, 0, W, H))
@@ -163,90 +206,115 @@ func renderFrame(opts RenderOptions, tris []rtri, c vec3, az, el, scale float64)
 		if n.length() == 0 {
 			continue
 		}
+		// The camera looks down -Z in view space. The triangle's points are
+		// mirrored (X negated) before the rotation, which reverses their
+		// winding, so a face whose file-space normal points at the camera has
+		// a view-space normal with negative Z.
+		if opts.CullBackFaces && n.Z >= 0 {
+			continue
+		}
 		shade := opts.Ambient + (1-opts.Ambient)*math.Abs(n.normalize().dot(light))
 		shade *= opts.Gain
 		sx0, sy0 := cxF+r0.X*scale, cyF-r0.Y*scale
 		sx1, sy1 := cxF+r1.X*scale, cyF-r1.Y*scale
 		sx2, sy2 := cxF+r2.X*scale, cyF-r2.Y*scale
-		rasterTri(img, zbuf, W, H, t, shade,
+		rasterTri(img, zbuf, W, H, t, shade, opts.KeyedTextures,
 			sx0, sy0, r0.Z, sx1, sy1, r1.Z, sx2, sy2, r2.Z)
 	}
 	return img
 }
 
-// buildTris flattens the object hierarchy into renderable triangles: applies
-// each object's offset, skips the selection primitive (the in-game selection
-// baseplate, not meant to be drawn), assigns the client's UV layout, resolves
-// each primitive's texture/colour, and fan-triangulates.
+// placedPiece is an object with the model-space origin its vertices are
+// offset by.
+type placedPiece struct {
+	obj    *Object
+	origin vec3
+}
+
+// placedPieces lists the model's pieces in preorder (the game's piece order)
+// with the origin the game draws each at. Pieces under the root accumulate
+// their offsets from the root down. Root siblings and their descendants keep
+// origin zero: the game's piece transform walk never reaches them. An object
+// reached twice (only possible in a hand-built tree) is listed once.
+func (m *Model) placedPieces() []placedPiece {
+	type item struct {
+		obj    *Object
+		origin vec3
+		placed bool // whether piece offsets apply
+	}
+	var out []placedPiece
+	seen := make(map[*Object]bool)
+	var stack []item
+	top := m.TopLevel()
+	for i := len(top) - 1; i >= 0; i-- {
+		stack = append(stack, item{obj: top[i], placed: i == 0})
+	}
+	for len(stack) > 0 {
+		it := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if it.obj == nil || seen[it.obj] {
+			continue
+		}
+		seen[it.obj] = true
+		o := it.obj
+		origin := it.origin
+		if it.placed {
+			origin = vec3{
+				origin.X + float64(o.XFromParent),
+				origin.Y + float64(o.YFromParent),
+				origin.Z + float64(o.ZFromParent),
+			}
+		}
+		out = append(out, placedPiece{obj: o, origin: origin})
+		for i := len(o.Children) - 1; i >= 0; i-- {
+			stack = append(stack, item{obj: o.Children[i], origin: origin, placed: it.placed})
+		}
+	}
+	return out
+}
+
+// buildTris flattens the model into renderable triangles in the game's draw
+// order: pieces from last to first, each piece's primitives in DrawOrder. It
+// mirrors X (the game shows file +X on the left when +Z faces the viewer),
+// skips the primitive the game hides (HiddenPrimitive), resolves each face's
+// look with Primitive.Style and fan-triangulates.
 func (m *Model) buildTris(opts RenderOptions) []rtri {
-	fallback := toRGBA8(opts.Base, color.RGBA{0xb6, 0xbc, 0xc6, 0xff})
-	var tris []rtri
 	if m == nil || m.Root == nil {
-		return tris
+		return nil
 	}
-	minY, maxY := m.worldYBounds()
-	yh := maxY - minY
-	// isBaseplate detects the flat, colour-keyed footprint/selection quad that
-	// sits at the model's base (the in-game selection/ground plate). Some 3DOs
-	// flag it via SelectionPrim, others don't — this catches both. It also
-	// keeps the plate out of the bounding box so sizing reflects the real model.
-	isBaseplate := func(wv []vec3, p Primitive) bool {
-		if !p.IsColored || len(p.VertexIndices) != 4 {
-			return false
-		}
-		mn, mx := math.Inf(1), math.Inf(-1)
-		for _, id := range p.VertexIndices {
-			y := wv[id].Y
-			mn, mx = math.Min(mn, y), math.Max(mx, y)
-		}
-		if mx-mn > yh*0.02 { // not flat/horizontal
-			return false
-		}
-		return mx <= minY+yh*0.12 // near the bottom
+	fallback := toRGBA8(opts.Base, defaultBase)
+	pieces := m.placedPieces()
+	var baseMinY, baseHeight float64
+	if opts.HideBaseplates {
+		var maxY float64
+		baseMinY, maxY = worldYBounds(pieces)
+		baseHeight = maxY - baseMinY
 	}
-	var walk func(o *Object, origin vec3)
-	walk = func(o *Object, origin vec3) {
-		oo := vec3{
-			origin.X + float64(o.XFromParent),
-			origin.Y + float64(o.YFromParent),
-			origin.Z + float64(o.ZFromParent),
-		}
+	var tris []rtri
+	for k := len(pieces) - 1; k >= 0; k-- {
+		o, origin := pieces[k].obj, pieces[k].origin
 		wv := make([]vec3, len(o.Vertices))
 		for i, v := range o.Vertices {
-			wv[i] = vec3{oo.X + float64(v.X), oo.Y + float64(v.Y), oo.Z + float64(v.Z)}
+			wv[i] = vec3{-(origin.X + float64(v.X)), origin.Y + float64(v.Y), origin.Z + float64(v.Z)}
 		}
-		for pi, p := range o.Primitives {
-			if int32(pi) == o.SelectionPrim || isBaseplate(wv, p) {
-				continue // baseplate / selection plate — not drawn
-			}
-			idx := p.VertexIndices
-			if len(idx) < 3 {
+		hidden := o.HiddenPrimitive()
+		for _, pi := range o.DrawOrder() {
+			if pi == hidden {
 				continue
 			}
-			valid := true
-			for _, id := range idx {
-				if id < 0 || id >= len(wv) {
-					valid = false
-					break
-				}
+			p := &o.Primitives[pi]
+			idx := p.VertexIndices
+			if len(idx) < 3 || !indicesInRange(idx, len(wv)) {
+				continue
 			}
-			if !valid {
+			if opts.HideBaseplates && isBaseplate(wv, p, baseMinY, baseHeight) {
+				continue
+			}
+			tex, col, ok := faceLook(p, opts.Material, fallback, opts.TexturePolygons)
+			if !ok {
 				continue
 			}
 			uvs := polyUVs(len(idx))
-			var tex *image.RGBA
-			col := fallback
-			if opts.Material != nil {
-				if p.IsColored {
-					if c, ok := opts.Material.PaletteColor(p.ColorIndex); ok {
-						col = c
-					}
-				} else if p.TextureName != "" {
-					if t, ok := opts.Material.Texture(p.TextureName); ok {
-						tex = t
-					}
-				}
-			}
 			for i := 1; i+1 < len(idx); i++ {
 				tris = append(tris, rtri{
 					p:   [3]vec3{wv[idx[0]], wv[idx[i]], wv[idx[i+1]]},
@@ -256,22 +324,78 @@ func (m *Model) buildTris(opts RenderOptions) []rtri {
 				})
 			}
 		}
-		for _, ch := range o.Children {
-			walk(ch, oo)
-		}
 	}
-	walk(m.Root, vec3{})
 	return tris
 }
 
-// polyUVs mirrors the studio web client's UV layout so server previews texture
-// the same way the in-app 3D viewer does.
+// faceLook resolves how a primitive is drawn: with a texture, with a flat
+// colour, or not at all. Without a material textures are assumed to resolve
+// and every drawn face takes the fallback colour. Synthetic primitives (from
+// FillModel) are textured whatever their corner count, as are all primitives
+// when anyPolygon is set.
+func faceLook(p *Primitive, mat Material, fallback color.RGBA, anyPolygon bool) (*image.RGBA, color.RGBA, bool) {
+	found := true
+	var tex *image.RGBA
+	if p.TextureName != "" && mat != nil {
+		tex, found = mat.Texture(p.TextureName)
+	}
+	style, index := p.Style(found)
+	if style == FaceHidden && (anyPolygon || p.Synthetic) && !p.IsColored &&
+		p.TextureName != "" && found && len(p.VertexIndices) >= 3 {
+		style = FaceTextured
+	}
+	switch style {
+	case FaceFilled:
+		col := fallback
+		if mat != nil {
+			if c, ok := mat.PaletteColor(int(index)); ok {
+				col = c
+			}
+		}
+		return nil, col, true
+	case FaceTextured:
+		return tex, fallback, true
+	}
+	return nil, fallback, false
+}
+
+func indicesInRange(idx []int, n int) bool {
+	for _, id := range idx {
+		if id < 0 || id >= n {
+			return false
+		}
+	}
+	return true
+}
+
+// isBaseplate detects a flat, colour-filled quad at the model's base (a
+// footprint plate). The vertex indices must already be in range.
+func isBaseplate(wv []vec3, p *Primitive, minY, height float64) bool {
+	if !p.IsColored || len(p.VertexIndices) != 4 {
+		return false
+	}
+	mn, mx := math.Inf(1), math.Inf(-1)
+	for _, id := range p.VertexIndices {
+		y := wv[id].Y
+		mn, mx = math.Min(mn, y), math.Max(mx, y)
+	}
+	if mx-mn > height*0.02 { // not flat/horizontal
+		return false
+	}
+	return mx <= minY+height*0.12 // near the bottom
+}
+
+// polyUVs returns per-corner texture coordinates, with v = 0 the texture's top
+// row. A quad maps corner 0 to the top-left texel, then top-right, bottom-right
+// and bottom-left, as the game does. Other corner counts are textured only for
+// synthetic primitives or with TexturePolygons: a triangle takes the first
+// three quad corners and an n-gon a circle inscribed in the texture.
 func polyUVs(count int) [][2]float64 {
 	switch count {
 	case 3:
-		return [][2]float64{{0, 1}, {1, 1}, {1, 0}}
+		return [][2]float64{{0, 0}, {1, 0}, {1, 1}}
 	case 4:
-		return [][2]float64{{0, 1}, {1, 1}, {1, 0}, {0, 0}}
+		return [][2]float64{{0, 0}, {1, 0}, {1, 1}, {0, 1}}
 	}
 	out := make([][2]float64, count)
 	for i := 0; i < count; i++ {
@@ -281,23 +405,15 @@ func polyUVs(count int) [][2]float64 {
 	return out
 }
 
-// worldYBounds returns the model's min/max world Y (height), used to detect
-// the base-plane footprint quad.
-func (m *Model) worldYBounds() (float64, float64) {
+// worldYBounds returns the min/max model-space Y (height) of the placed
+// pieces' vertices, used to detect base-plane footprint quads.
+func worldYBounds(pieces []placedPiece) (float64, float64) {
 	minY, maxY := math.Inf(1), math.Inf(-1)
-	var walk func(o *Object, oy float64)
-	walk = func(o *Object, oy float64) {
-		y0 := oy + float64(o.YFromParent)
-		for _, v := range o.Vertices {
-			y := y0 + float64(v.Y)
+	for _, pc := range pieces {
+		for _, v := range pc.obj.Vertices {
+			y := pc.origin.Y + float64(v.Y)
 			minY, maxY = math.Min(minY, y), math.Max(maxY, y)
 		}
-		for _, c := range o.Children {
-			walk(c, y0)
-		}
-	}
-	if m.Root != nil {
-		walk(m.Root, 0)
 	}
 	if math.IsInf(minY, 1) {
 		return 0, 0
@@ -374,8 +490,10 @@ func toRGBA8(c color.Color, def color.RGBA) color.RGBA {
 
 // rasterTri rasterises a triangle with per-pixel depth testing. Pixels take the
 // texture sample (affine UV — exact under orthographic projection) or the flat
-// colour, multiplied by the face shade.
-func rasterTri(img *image.RGBA, zbuf []float64, W, H int, t rtri, shade float64,
+// colour, multiplied by the face shade. A fragment within depthTieTolerance of
+// the stored depth replaces it, so the later of two coplanar faces wins. With
+// keyed set, texels whose alpha is 0 are skipped.
+func rasterTri(img *image.RGBA, zbuf []float64, W, H int, t rtri, shade float64, keyed bool,
 	x0, y0, z0, x1, y1, z1, x2, y2, z2 float64) {
 	minX := int(math.Floor(math.Min(x0, math.Min(x1, x2))))
 	maxX := int(math.Ceil(math.Max(x0, math.Max(x1, x2))))
@@ -403,13 +521,14 @@ func rasterTri(img *image.RGBA, zbuf []float64, W, H int, t rtri, shade float64,
 			w0 := edge(x1, y1, x2, y2, px, py)
 			w1 := edge(x2, y2, x0, y0, px, py)
 			w2 := edge(x0, y0, x1, y1, px, py)
-			if !((w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+			if !((w0 >= -edgeEpsilon && w1 >= -edgeEpsilon && w2 >= -edgeEpsilon) ||
+				(w0 <= edgeEpsilon && w1 <= edgeEpsilon && w2 <= edgeEpsilon)) {
 				continue
 			}
 			l0, l1, l2 := w0/area, w1/area, w2/area
 			z := l0*z0 + l1*z1 + l2*z2
 			idx := y*W + x
-			if z <= zbuf[idx] {
+			if z < zbuf[idx]-depthTieTolerance {
 				continue
 			}
 			var cr, cg, cb uint8
@@ -418,16 +537,17 @@ func rasterTri(img *image.RGBA, zbuf []float64, W, H int, t rtri, shade float64,
 				v := l0*t.uv[0][1] + l1*t.uv[1][1] + l2*t.uv[2][1]
 				var ca uint8
 				cr, cg, cb, ca = sampleTex(t.tex, u, v)
-				// Transparent texel (e.g. a TA:Kingdoms wing/glass key punched
-				// out of the texture): skip it so the colour beneath shows and
+				// A keyed texel is punched out: the colour beneath shows and
 				// the z-buffer isn't claimed by an invisible fragment.
-				if ca == 0 {
+				if keyed && ca == 0 {
 					continue
 				}
 			} else {
 				cr, cg, cb = t.col.R, t.col.G, t.col.B
 			}
-			zbuf[idx] = z
+			if z > zbuf[idx] {
+				zbuf[idx] = z
+			}
 			o := img.PixOffset(x, y)
 			img.Pix[o+0] = shade8(cr, shade)
 			img.Pix[o+1] = shade8(cg, shade)
@@ -441,7 +561,7 @@ func sampleTex(tex *image.RGBA, u, v float64) (uint8, uint8, uint8, uint8) {
 	b := tex.Bounds()
 	tw, th := b.Dx(), b.Dy()
 	if tw == 0 || th == 0 {
-		return 0xb6, 0xbc, 0xc6, 0xff
+		return defaultBase.R, defaultBase.G, defaultBase.B, defaultBase.A
 	}
 	u = clamp01(u)
 	v = clamp01(v)
