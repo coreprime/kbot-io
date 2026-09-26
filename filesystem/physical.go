@@ -2,8 +2,10 @@ package filesystem
 
 import (
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Ensure PhysicalFileSystem implements FileSystem
@@ -32,22 +34,47 @@ func NewPhysicalFileSystem(basePath string) (*PhysicalFileSystem, error) {
 	}, nil
 }
 
-// Open opens a file for reading
+// resolve maps a caller path to a location under the base directory. '\'
+// and '/' both separate segments. A path that would leave the base directory
+// once cleaned (for example "../x" or "a/../../x") is refused.
+func (pfs *PhysicalFileSystem) resolve(path string) (string, error) {
+	rel := filepath.FromSlash(strings.ReplaceAll(path, `\`, "/"))
+	full := filepath.Join(pfs.basePath, rel)
+	within, err := filepath.Rel(pfs.basePath, full)
+	if err != nil || within == ".." || strings.HasPrefix(within, ".."+string(filepath.Separator)) {
+		return "", &fs.PathError{Op: "open", Path: path, Err: fs.ErrInvalid}
+	}
+	return full, nil
+}
+
+// Open opens a file for reading. Paths that leave the base directory are
+// refused.
 func (pfs *PhysicalFileSystem) Open(path string) (io.ReadCloser, error) {
-	fullPath := filepath.Join(pfs.basePath, path)
+	fullPath, err := pfs.resolve(path)
+	if err != nil {
+		return nil, err
+	}
 	return os.Open(fullPath)
 }
 
-// ReadFile reads the entire file content
+// ReadFile reads the entire file content. Paths that leave the base
+// directory are refused.
 func (pfs *PhysicalFileSystem) ReadFile(path string) ([]byte, error) {
-	fullPath := filepath.Join(pfs.basePath, path)
+	fullPath, err := pfs.resolve(path)
+	if err != nil {
+		return nil, err
+	}
 	return os.ReadFile(fullPath)
 }
 
-// Exists checks if a file exists
+// Exists checks if a file exists. It is false for paths that leave the base
+// directory.
 func (pfs *PhysicalFileSystem) Exists(path string) bool {
-	fullPath := filepath.Join(pfs.basePath, path)
-	_, err := os.Stat(fullPath)
+	fullPath, err := pfs.resolve(path)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(fullPath)
 	return err == nil
 }
 
