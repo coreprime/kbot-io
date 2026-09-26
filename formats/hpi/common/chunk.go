@@ -152,8 +152,8 @@ func inflateBlock(payload []byte, want int, strict bool) ([]byte, error) {
 		}
 	}
 	if strict {
-		var probe [1]byte
-		m, rerr := zr.Read(probe[:])
+		var extra [1]byte
+		m, rerr := zr.Read(extra[:])
 		if m != 0 {
 			return nil, fmt.Errorf("zlib stream runs past the %d bytes the header states", want)
 		}
