@@ -131,3 +131,43 @@ func TestNoAudioWithoutPresentBit(t *testing.T) {
 		t.Errorf("Info() lists audio tracks:\n%s", r.Info())
 	}
 }
+
+// TestFrameRate checks the frame-rate encodings: positive values are
+// milliseconds per frame, negative values hundred-thousandths of a second.
+func TestFrameRate(t *testing.T) {
+	cases := []struct {
+		rate     int32
+		fps      float64
+		duration float64 // for 3 frames
+	}{
+		{rate: 50, fps: 20, duration: 0.15},
+		{rate: 1000, fps: 1, duration: 3},
+		{rate: -3333, fps: 100000.0 / 3333, duration: 3 * 3333 / 100000.0},
+		{rate: -10000, fps: 10, duration: 0.3},
+		{rate: 0, fps: smacker.DefaultFrameRate, duration: 3 / smacker.DefaultFrameRate},
+		// The most negative value must not overflow into a negative rate.
+		{rate: -2147483648, fps: 100000.0 / 2147483648, duration: 3 * 2147483648 / 100000.0},
+	}
+	for _, c := range cases {
+		s := defaultSpec()
+		s.rate = c.rate
+		r := s.open(t)
+		if got := r.FrameRate(); !near(got, c.fps) {
+			t.Errorf("rate %d: FrameRate = %v, want %v", c.rate, got, c.fps)
+		}
+		if got := r.Header().FramesPerSecond(); !near(got, c.fps) {
+			t.Errorf("rate %d: FramesPerSecond = %v, want %v", c.rate, got, c.fps)
+		}
+		if got := r.Duration(); !near(got, c.duration) {
+			t.Errorf("rate %d: Duration = %v, want %v", c.rate, got, c.duration)
+		}
+	}
+}
+
+func near(a, b float64) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d <= 1e-9*(1+b)
+}

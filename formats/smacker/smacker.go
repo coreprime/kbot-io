@@ -20,6 +20,13 @@ const (
 
 	// AudioTrackCount is the number of audio tracks a header describes.
 	AudioTrackCount = 7
+
+	// DefaultFrameRate is the rate, in frames per second, that FrameRate
+	// reports for a header whose frame-rate field is 0. That value has no
+	// defined timing in the header: FFmpeg rejects it, other Smacker
+	// decoders use 10 fps, and the rate TA 3.1c plays such a file at has not
+	// been established. The shipped TA movies all store -3333 (about 30 fps).
+	DefaultFrameRate = 15.0
 )
 
 // Header represents a Smacker video file header
@@ -28,7 +35,11 @@ type Header struct {
 	Width     uint32
 	Height    uint32
 	Frames    uint32
-	FrameRate int32 // Microseconds per frame (negative = frames per second)
+	// FrameRate encodes the frame time. A positive value n is n milliseconds
+	// per frame (1000/n fps); a negative value n is -n hundred-thousandths of
+	// a second per frame (100000/-n fps, so -3333 is about 30 fps); 0 has no
+	// defined timing (see DefaultFrameRate).
+	FrameRate int32
 	Flags     uint32
 	// AudioSize holds, per track, the size of the largest audio chunk in any
 	// frame (a buffer size, not the track's total size).
@@ -123,26 +134,30 @@ func (r *Reader) FrameCount() int {
 	return int(r.header.Frames)
 }
 
-// FrameRate returns frames per second
+// FrameRate returns frames per second; see Header.FramesPerSecond.
 func (r *Reader) FrameRate() float64 {
-	if r.header.FrameRate < 0 {
-		// Negative values appear to be stored as: -(100000 / fps)
-		// For 30 fps: -(100000/30) = -3333.33 ≈ -3333
-		// So to get fps: 100000 / abs(value)
-		fps := 100000.0 / float64(-r.header.FrameRate)
-		return fps
-	}
-	if r.header.FrameRate == 0 {
-		return 15.0 // Default fallback
-	}
-
-	// Positive means microseconds per frame
-	return 1000000.0 / float64(r.header.FrameRate)
+	return r.header.FramesPerSecond()
 }
 
-// Duration returns video duration in seconds
+// Duration returns the video duration in seconds: FrameCount frames at
+// FrameRate.
 func (r *Reader) Duration() float64 {
 	return float64(r.header.Frames) / r.FrameRate()
+}
+
+// FramesPerSecond decodes FrameRate. A positive value is milliseconds per
+// frame, a negative value hundred-thousandths of a second per frame, and 0
+// gives DefaultFrameRate. The result is always positive.
+func (h *Header) FramesPerSecond() float64 {
+	switch {
+	case h.FrameRate > 0:
+		return 1000.0 / float64(h.FrameRate)
+	case h.FrameRate < 0:
+		// Negate in float64: -math.MinInt32 does not fit in an int32.
+		return 100000.0 / -float64(h.FrameRate)
+	default:
+		return DefaultFrameRate
+	}
 }
 
 // SignatureString returns the four-character signature ("SMK2" or "SMK4").
