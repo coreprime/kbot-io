@@ -21,6 +21,15 @@ depend on the format code without pulling in the full CLI.
   TA:K texture palettes.
 - **`testutil/`** — test helpers for locating optional unpacked game assets.
 
+### PCX images
+
+- `pcx` decodes to the PCX specification by default. `Reader.DecodeGame`
+  (or `DecodeOptions{Mode: pcx.ModeGame}`) decodes a file the way TA 3.1c
+  does: version 5 only, every file treated as 8-bit single-plane, rows of
+  exactly `width` bytes whatever BytesPerLine says, and the palette taken from
+  the last 768 bytes whether or not a 0x0C marker precedes it.
+  `Reader.Compat` lists every way a file departs from those rules.
+
 ## Usage
 
 ```go

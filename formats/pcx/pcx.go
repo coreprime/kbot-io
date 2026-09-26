@@ -47,12 +47,52 @@ const (
 	// PaletteMarker is the byte that precedes the trailing colour map in a
 	// standard 256-colour PCX.
 	PaletteMarker = 0x0C
+	// GameVersion is the only PCX version TA 3.1c loads.
+	GameVersion = 5
+	// MinGameFileSize is the smallest file TA 3.1c loads: the header plus the
+	// colour map.
+	MinGameFileSize = HeaderSize + ColorMapSize
 
 	manufacturerZSoft = 0x0A
+	encodingRLE       = 1
 )
 
 // ErrTruncated reports pixel data that ends before the last row.
 var ErrTruncated = errors.New("pcx: pixel data ends before the last row")
+
+// ErrGameRejects is wrapped by DecodeGame errors for files TA 3.1c refuses to
+// load.
+var ErrGameRejects = errors.New("pcx: TA 3.1c does not load this file")
+
+// DecodeMode selects how a Reader interprets a PCX file.
+type DecodeMode int
+
+const (
+	// ModeStandard decodes the file as the PCX specification describes. It
+	// is the default.
+	ModeStandard DecodeMode = iota
+	// ModeGame decodes the file as TA 3.1c does; see the package
+	// documentation.
+	ModeGame
+)
+
+// String returns the mode name.
+func (m DecodeMode) String() string {
+	switch m {
+	case ModeStandard:
+		return "standard"
+	case ModeGame:
+		return "game"
+	default:
+		return fmt.Sprintf("DecodeMode(%d)", int(m))
+	}
+}
+
+// DecodeOptions controls Reader.DecodeWithOptions.
+type DecodeOptions struct {
+	// Mode selects standard (default) or game decoding.
+	Mode DecodeMode
+}
 
 // Reader provides methods for reading PCX files. A Reader is not safe for
 // concurrent use: each decode records whether its pixel data was truncated.
@@ -64,7 +104,8 @@ type Reader struct {
 }
 
 // LoadFromReader reads a whole PCX file from r and parses its header. Only
-// the manufacturer byte is checked here.
+// the manufacturer byte is checked here; use Compat or DecodeGame to apply the
+// game's rules.
 func LoadFromReader(r io.Reader) (*Reader, error) {
 	// Read entire file to support embedded palettes
 	data, err := io.ReadAll(r)
@@ -130,10 +171,26 @@ func (r *Reader) Truncated() bool {
 // asset yet rejects the pathological allocation.
 const maxImagePixels = 64 << 20
 
-// Decode decodes the image as the PCX specification describes; see the
-// package documentation.
+// Decode decodes the image in standard mode (see ModeStandard).
 func (r *Reader) Decode() (image.Image, error) {
 	return r.decodeStandard()
+}
+
+// DecodeWithOptions decodes the image in the mode opts selects. In ModeGame
+// the result is always an *image.Paletted.
+func (r *Reader) DecodeWithOptions(opts DecodeOptions) (image.Image, error) {
+	switch opts.Mode {
+	case ModeStandard:
+		return r.decodeStandard()
+	case ModeGame:
+		img, err := r.DecodeGame()
+		if err != nil {
+			return nil, err
+		}
+		return img, nil
+	default:
+		return nil, fmt.Errorf("pcx: unknown decode mode %v", opts.Mode)
+	}
 }
 
 // checkExtent rejects inverted bounds and images above the pixel cap.
@@ -469,8 +526,23 @@ func ConvertToGIFWithPalette(w io.Writer, r io.Reader, pal *gaf.Palette) error {
 	return gif.Encode(w, paletted, nil)
 }
 
+// ConvertToPNGWithOptions converts a PCX image to PNG, decoding it in the
+// mode opts selects. Use ModeGame to preview a file as TA 3.1c draws it.
+func ConvertToPNGWithOptions(w io.Writer, r io.Reader, opts DecodeOptions) error {
+	reader, err := LoadFromReader(r)
+	if err != nil {
+		return err
+	}
+	img, err := reader.DecodeWithOptions(opts)
+	if err != nil {
+		return err
+	}
+	return png.Encode(w, img)
+}
+
 // HasEmbeddedPalette reports whether a 0x0C marker precedes the last 768
-// bytes, which is how the PCX specification marks a 256-colour map.
+// bytes, which is how the PCX specification marks a 256-colour map. The game
+// uses the last 768 bytes as the palette either way; see GamePalette.
 func (r *Reader) HasEmbeddedPalette() bool {
 	return r.embedded
 }
@@ -481,8 +553,8 @@ func (r *Reader) HasEmbeddedPalette() bool {
 //
 // The entries follow the gaf package's palette convention (the same result as
 // gaf.LoadPaletteFromBytes on the colours), including its treatment of index
-// 0. For drawing the image itself use the decoded image's palette, which is
-// opaque.
+// 0. For drawing the image itself use the decoded image's palette or
+// GamePalette, which are opaque.
 //
 // TA: Kingdoms uses sidecar PCX files (often 1x1 px) purely as palette
 // containers next to .gaf files, so this is the canonical way to fish the
