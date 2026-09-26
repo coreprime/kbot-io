@@ -43,7 +43,8 @@ func ConvertToMP4(bikPath, mp4Path string) error {
 	return nil
 }
 
-// Note: there is deliberately no ConvertFromMP4. Unlike Smacker (where some
-// FFmpeg builds carry the smackvid/smackaud encoders), no open-source Bink
+// Note: there is deliberately no ConvertFromMP4. No open-source Bink
 // encoder exists — only RAD's proprietary tools produce .bik files. Bink
-// support is therefore decode-only.
+// support is therefore decode-only. (Smacker is in the same position:
+// FFmpeg decodes it but has no Smacker encoder or muxer, so
+// smacker.ConvertFromMP4 reports smacker.ErrNoSmackerWriter.)

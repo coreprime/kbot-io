@@ -11,7 +11,8 @@ depend on the format code without pulling in the full CLI.
 - **`formats/`** — parsers and writers for the game data formats, including:
   - `hpi` (HPI/GP3 archives, v1 and v2), `gaf`/`tsf` (sprite banks), `pcx`,
     `pal` (palettes), `tnt`/`sct` (maps and terrain, incl. TA:K), `fnt` (fonts),
-    `crt`, `bik`/`smacker` (video), `objects3d` (3DO/TDO models),
+    `crt`, `bik`/`smacker` (video headers, plus decode-only MP4 conversion
+    through FFmpeg), `objects3d` (3DO/TDO models),
     `tdf` (config files), `gamedata` (unit/weapon definitions for TA and TA:K),
     `scripting` (COB scripting: parser, compiler, decompiler, assembly, linter),
     and `ai`. The COB tools follow the game's rules: opcodes are decoded the

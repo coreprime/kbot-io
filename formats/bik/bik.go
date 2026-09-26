@@ -7,8 +7,8 @@
 // compressed video bitstream: Bink uses a proprietary DCT-based codec with no
 // open-source encoder.  Pixel decoding and conversion are delegated to FFmpeg,
 // which ships a Bink 1 decoder (binkvideo + binkaudio_dct/rdft).  Because no
-// Bink encoder exists outside RAD's own tools, conversion is decode-only — the
-// reverse of smacker.ConvertFromMP4 is intentionally absent.
+// Bink encoder exists outside RAD's own tools, conversion is decode-only, as
+// it is for Smacker.
 package bik
 
 import (
