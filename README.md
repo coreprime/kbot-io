@@ -21,6 +21,35 @@ depend on the format code without pulling in the full CLI.
   TA:K texture palettes.
 - **`testutil/`** — test helpers for locating optional unpacked game assets.
 
+## TDF text files
+
+`formats/tdf` reads TDF, FBI, GUI and OTA text the way TA 3.1c does, and every
+reader in the package (the `Document` tree, `Unmarshal`/`Decoder`,
+`Canonicalize`, `SemanticEqual`) shares that one grammar:
+
+- comments (`//` and `/* */`) are blanked byte for byte, even inside values;
+- a value runs to the next `;` wherever it is, across line breaks and braces,
+  so a missing `;` swallows the following text exactly as in the game;
+- a `}` outside any section ends the file, a NUL byte ends the text, and only
+  space, tab, CR and LF separate tokens (a UTF-8 byte order mark is text);
+- a lookup by name finds the first section of that name, a key assigned
+  twice keeps its last value, and keys match ignoring ASCII case only;
+- numbers and flags read with the game's rules (`Atol`, `Atof`, `Fixed`,
+  `Flag`), so `13O` is 13 and `canmove=true` is false.
+
+Files the game would refuse are repaired and reported by default
+(`Diagnose`, `Document.Diagnostics`); `ParseOptions{Strict: true}` refuses
+them with the byte offset instead. Writers refuse keys and values the grammar
+cannot carry, such as a `;` in a value or a URL's `//`.
+
+A struct gains a `tdf.Meta` field tagged `tdf:",meta"` to tell a missing key
+from an explicit zero (the game applies non-zero defaults to many missing
+keys): `Marshal` then writes every key the source had, keeps unchanged values'
+text and the source order. `SemanticEqual` treats a missing key and an explicit
+zero as different. `Document.Bytes` rewrites a parsed file in place, changing
+only the edited values, so comments, layout and the hashes the game takes over
+file text survive.
+
 ## Usage
 
 ```go
