@@ -128,7 +128,9 @@ func (m *Model) RenderImage(opts RenderOptions) *image.RGBA {
 // RenderSpinAPNG renders an N-frame 360° spin about the model centre as a
 // truecolor animated PNG. Uses the SAME scale/centre as RenderImage so hovering
 // from the still into the spin doesn't jump. Falls back to a still when n<=1.
-// delayMs is the delay of each frame; 0 or less means 90 ms.
+// delayMs is the delay of each frame in milliseconds; 0 or less selects the
+// default of 90 ms. Delays over 65535 ms are stored in hundredths, tenths or
+// whole seconds.
 func (m *Model) RenderSpinAPNG(opts RenderOptions, frames, delayMs int) ([]byte, error) {
 	normalizeOpts(&opts)
 	if frames <= 1 {

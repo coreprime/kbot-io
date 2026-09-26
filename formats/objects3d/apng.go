@@ -111,16 +111,18 @@ func (translucentRGBA) Opaque() bool { return false }
 
 // apngDelay expresses a frame delay in milliseconds as the 16-bit numerator
 // and denominator (a fraction of a second) an fcTL chunk stores, using the
-// finest of 1/1000, 1/100, 1/10 and 1 second that fits.
+// finest of 1/1000, 1/100, 1/10 and 1 second that fits. The arithmetic is
+// done in 64 bits so it cannot overflow where int is 32 bits wide.
 func apngDelay(ms int) (num, den uint16) {
 	if ms <= 0 {
 		return 0, 1000
 	}
-	if ms > math.MaxUint16*1000 {
+	m := int64(ms)
+	if m > math.MaxUint16*1000 {
 		return math.MaxUint16, 1
 	}
-	for _, d := range []int{1000, 100, 10, 1} {
-		if n := (ms*d + 500) / 1000; n <= math.MaxUint16 {
+	for _, d := range []int64{1000, 100, 10, 1} {
+		if n := (m*d + 500) / 1000; n <= math.MaxUint16 {
 			return uint16(n), uint16(d)
 		}
 	}

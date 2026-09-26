@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"testing"
 )
 
@@ -119,8 +120,11 @@ func TestAPNGDelay(t *testing.T) {
 		{65536, 6554, 100},
 		{70000, 7000, 100},
 		{1000000, 10000, 10},
+		{3000000, 30000, 10}, // 3000000*1000 overflows a 32-bit int
 		{65535 * 1000, 65535, 1},
-		{1 << 40, 65535, 1},
+		{math.MaxInt32, 65535, 1},
+		{0, 0, 1000},
+		{-5, 0, 1000},
 	}
 	for _, c := range cases {
 		if num, den := apngDelay(c.ms); num != c.num || den != c.den {
@@ -140,6 +144,26 @@ func TestAPNGDelay(t *testing.T) {
 	for i, d := range delays {
 		if d != [2]uint16{7000, 100} {
 			t.Errorf("frame %d delay = %d/%d, want 7000/100", i, d[0], d[1])
+		}
+	}
+}
+
+// A spin delay of 0 or less selects the 90 ms default.
+func TestRenderSpinAPNGDefaultDelay(t *testing.T) {
+	root := colouredCube(1000)
+	m := &Model{Root: root, AllObjects: []*Object{root}}
+	opts := DefaultRenderOptions()
+	opts.UnitsPerPixel = 1
+	for _, ms := range []int{0, -1, -65536} {
+		b, err := m.RenderSpinAPNG(opts, 2, ms)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, delays := decodeAPNGFrames(t, b)
+		for i, d := range delays {
+			if d != [2]uint16{90, 1000} {
+				t.Errorf("delay %d: frame %d delay = %d/%d, want 90/1000", ms, i, d[0], d[1])
+			}
 		}
 	}
 }
