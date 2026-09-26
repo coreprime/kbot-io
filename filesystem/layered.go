@@ -15,10 +15,12 @@ const defaultWritableLabel = "Workspace"
 type SourceKind int
 
 const (
-	// SourceContextDir is a game-install directory: its archives are loaded in
-	// extension priority order, then its loose physical files are overlaid.
+	// SourceContextDir is a game-install directory: its archives are loaded
+	// with the configured discovery mode (see Config.Discovery), then its
+	// loose physical files are overlaid.
 	SourceContextDir SourceKind = iota
-	// SourceArchive is a single archive file.
+	// SourceArchive is a single archive file of either version. It is
+	// mounted as given, whatever the discovery mode.
 	SourceArchive
 	// SourceLooseDir is a plain directory of loose files (no archives), such as
 	// a workspace's writable work folder.
@@ -44,6 +46,8 @@ type Source struct {
 // NewLayered creates a virtual filesystem from an ordered stack of sources.
 // sources[0] is the highest-priority (top) layer; later entries are lower
 // priority. Files present in more than one source resolve to the top-most one.
+// Within a SourceContextDir, loose files rank above the directory's archives,
+// and the archives rank among themselves by Config.Discovery.
 //
 // A single writable SourceLooseDir may be supplied as sources[0] to make the
 // VFS support copy-on-write edits (see WriteFile/EnsureLocal/Remove).
@@ -100,6 +104,7 @@ func NewLayered(sources []Source, config *Config) (*VirtualFileSystem, error) {
 	for i := len(sources) - 1; i >= 0; i-- {
 		if err := vfs.loadSource(sources[i]); err != nil {
 			if !config.SkipErrors {
+				_ = vfs.Close()
 				return nil, err
 			}
 		}
@@ -113,12 +118,7 @@ func NewLayered(sources []Source, config *Config) (*VirtualFileSystem, error) {
 func (vfs *VirtualFileSystem) loadSource(src Source) error {
 	switch src.Kind {
 	case SourceContextDir:
-		if err := vfs.loadArchivesFrom(src.Path); err != nil {
-			if !vfs.config.SkipErrors {
-				return err
-			}
-		}
-		return vfs.scanLooseFrom(src.Path, physicalSource)
+		return vfs.loadContextDir(src.Path)
 
 	case SourceArchive:
 		return vfs.loadArchive(filepath.Base(src.Path), src.Path)
@@ -130,28 +130,51 @@ func (vfs *VirtualFileSystem) loadSource(src Source) error {
 		} else if label == "" {
 			label = filepath.Base(src.Path)
 		}
-		return vfs.scanLooseFrom(src.Path, label)
+		rec, err := vfs.scanLooseFrom(src.Path, label, false)
+		if src.Writable {
+			vfs.writableLayer = rec
+		}
+		return err
 
 	default:
 		return fmt.Errorf("filesystem: unknown source kind %d", src.Kind)
 	}
 }
 
+// writablePath checks a path for the writable overlay and returns it with
+// '/' separators and no leading '/'. Every segment must be non-empty and
+// neither "." nor "..", so the file stays inside the work folder and its key
+// names exactly one file.
+func writablePath(p string) (string, error) {
+	rel := strings.TrimPrefix(strings.ReplaceAll(p, `\`, "/"), "/")
+	if !safeVFSPath(rel) {
+		return "", fmt.Errorf("filesystem: invalid path %q: empty, \".\" or \"..\" segment", p)
+	}
+	return rel, nil
+}
+
 // diskPathFor maps a virtual path to its on-disk location in the work folder,
 // preserving the caller's casing for the physical file name.
-func (vfs *VirtualFileSystem) diskPathFor(path string) string {
-	rel := strings.TrimPrefix(filepath.ToSlash(path), "/")
-	return filepath.Join(vfs.writeDir, filepath.FromSlash(rel))
+func (vfs *VirtualFileSystem) diskPathFor(path string) (string, error) {
+	rel, err := writablePath(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(vfs.writeDir, filepath.FromSlash(rel)), nil
 }
 
 // WriteFile writes data to the writable overlay layer, overriding any
-// lower-layer version of the same path. It fails if the VFS is read-only.
+// lower-layer version of the same path. It fails if the VFS is read-only, and
+// for a path with an empty, "." or ".." segment.
 func (vfs *VirtualFileSystem) WriteFile(path string, data []byte) error {
 	if vfs.writeDir == "" {
 		return fmt.Errorf("filesystem: read-only (no writable layer)")
 	}
 
-	diskPath := vfs.diskPathFor(path)
+	diskPath, err := vfs.diskPathFor(path)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(diskPath), 0o755); err != nil {
 		return err
 	}
@@ -172,6 +195,11 @@ func (vfs *VirtualFileSystem) WriteFile(path string, data []byte) error {
 	}
 	vfs.fileLayers[normalized] = append(vfs.fileLayers[normalized], layer)
 	vfs.setActiveFromLayer(normalized, layer)
+	if rec := vfs.writableLayer; rec != nil {
+		rec.removeLoose(normalized)
+		rel, _ := writablePath(path)
+		rec.loose = append(rec.loose, looseFile{key: normalized, stored: rel, physPath: diskPath, size: int64(len(data))})
+	}
 	vfs.filesMu.Unlock()
 
 	vfs.md5Mutex.Lock()
@@ -179,6 +207,17 @@ func (vfs *VirtualFileSystem) WriteFile(path string, data []byte) error {
 	vfs.md5Mutex.Unlock()
 
 	return nil
+}
+
+// removeLoose drops every loose file with the given key from the layer.
+func (rec *layerRecord) removeLoose(key string) {
+	kept := rec.loose[:0]
+	for _, f := range rec.loose {
+		if f.key != key {
+			kept = append(kept, f)
+		}
+	}
+	rec.loose = kept
 }
 
 // IsLocal reports whether a path is backed by the writable overlay layer
@@ -206,6 +245,9 @@ func (vfs *VirtualFileSystem) EnsureLocal(path string) error {
 	if vfs.writeDir == "" {
 		return fmt.Errorf("filesystem: read-only (no writable layer)")
 	}
+	if _, err := writablePath(path); err != nil {
+		return err
+	}
 	if vfs.IsLocal(path) {
 		return nil
 	}
@@ -226,6 +268,9 @@ func (vfs *VirtualFileSystem) EnsureLocal(path string) error {
 func (vfs *VirtualFileSystem) Remove(path string) error {
 	if vfs.writeDir == "" {
 		return fmt.Errorf("filesystem: read-only (no writable layer)")
+	}
+	if _, err := writablePath(path); err != nil {
+		return err
 	}
 	normalized := vfs.normalizePath(path)
 
@@ -251,6 +296,9 @@ func (vfs *VirtualFileSystem) Remove(path string) error {
 
 	if localPhys != "" {
 		_ = os.Remove(localPhys)
+	}
+	if rec := vfs.writableLayer; rec != nil {
+		rec.removeLoose(normalized)
 	}
 
 	remaining := make([]FileLayer, 0, len(layers))

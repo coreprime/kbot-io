@@ -31,6 +31,36 @@ import (
 )
 ```
 
+## HPI archives and the virtual filesystem
+
+The HPI readers and the VFS resolve files the way Total Annihilation 3.1c does:
+
+- **Which archives mount.** By default a TA directory is scanned the way the
+  game scans it: top level only, `rev31.gp3`, then `*.ccx`, `*.ufo` and the
+  first ten `*.hpi` that open, each group in name order with ASCII letters
+  upper-cased. The first archive holding a path wins and loose files beat every
+  archive. An archive mounts only if it is a version 1 archive ending with the
+  36-byte `Copyright ____ Cavedog Entertainment` trailer; others are skipped
+  and listed by `SkippedArchives`, and do not count toward the ten. A
+  directory whose archives are all TA: Kingdoms (version 2) archives keeps the
+  all-archives order TA: Kingdoms needs (`data.hpi` overlaid by `IPData.hpi`);
+  `Config.Discovery` selects either mode explicitly. `MountOrder` reports the
+  resulting precedence and `ListGameOrder` enumerates a directory in the
+  game's order, duplicates included.
+- **Lookups.** `\` and `/` both separate paths on every host, only ASCII
+  letters fold case, the last of several same-named entries wins, and a path
+  that is unreachable in one archive falls through to the next.
+- **Reading.** Header key bytes 0 and 0xFF mean "not encrypted"; chunks are
+  located through the chunk-size table and placed in fixed 64 KiB blocks; SQSH
+  type 0 is refused inside chunked entries; LZ77 chunks must terminate and
+  match their size; zlib chunks follow the game's lenient length rule
+  (`v1.ReadOptions.Strict` makes them strict).
+- **Writing.** The v1 writer requires the Cavedog trailer, writes compression
+  method 0 as stored entries, merges directories ignoring case and refuses
+  empty, `.` and `..` path segments and names over 255 bytes.
+- **Checking an archive.** `hpi.Validate` reports the version, header and
+  effective key, trailer, and whether TA 3.1c would mount the file.
+
 ## Testing
 
 Most tests round-trip synthetic data in memory and run without any game

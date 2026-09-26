@@ -49,9 +49,12 @@ func TestPackedTNTRoundTrip(t *testing.T) {
 	t.Log("Performing TNT file round-trip test")
 	packedRoot := testutil.PackedPath(t)
 
+	// AC01 and CC13 ship only in totala4.hpi, which the game reaches from the
+	// CD rather than the install directory, so mount every archive.
 	vfs, err := filesystem.NewVirtualFileSystem(packedRoot, &filesystem.Config{
 		Extensions: []string{".hpi", ".ccx", ".gp3", ".ufo"},
 		SkipErrors: true,
+		Discovery:  filesystem.DiscoveryAllArchives,
 	})
 	if err != nil {
 		t.Fatalf("mount VFS at %s: %v", packedRoot, err)

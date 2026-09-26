@@ -5,8 +5,45 @@
 // - Archive files (.hpi, .ufo, .ccx, .gp3)
 // - Physical files on disk
 //
-// Files in archives are layered with higher-priority archives overriding lower-priority ones.
-// Physical files always override archive files.
+// Physical (loose) files in a game directory always override that
+// directory's archive files. Between archives, precedence depends on the
+// discovery mode (see Config.Discovery):
+//
+//   - DiscoveryGameOrder reproduces Total Annihilation 3.1c. Only the top
+//     level of the game directory is scanned. The game mounts rev31.gp3 (the
+//     revision is Config.GameVersion), then every *.ccx, then every *.ufo, then
+//     the first ten *.hpi that open, each group sorted by name with ASCII
+//     letters upper-cased, then the *.hpi files of any Config.DiscRoots. An
+//     archive mounts only if it is a version 1 archive whose last 36 bytes are
+//     the Cavedog copyright trailer and whose directory reads; any other file
+//     is skipped, reported by SkippedArchives, and does not count toward the
+//     ten-archive limit. A path resolves to the first mounted archive that
+//     holds it as a file.
+//   - DiscoveryAllArchives walks the whole directory tree and loads every
+//     archive with a configured extension in the order .hpi, .ccx, .gp3, .ufo
+//     (then any other configured extension), each group sorted by
+//     lower-cased name; a later archive overrides an earlier one. TA: Kingdoms
+//     needs this order: data.hpi must be overlaid by IPData.hpi.
+//   - DiscoveryAuto, the default, uses DiscoveryAllArchives for a directory
+//     whose top-level archives are all TA: Kingdoms (version 2) archives and
+//     DiscoveryGameOrder otherwise.
+//
+// MountOrder lists the mounted archives in lookup order, and ListGameOrder
+// enumerates a directory the way the game's loaders see it.
+//
+// Lookups follow the game's rules. Paths may use '\' or '/' on every host,
+// and names compare with ASCII letter case folded (bytes 0x80 and above,
+// such as accented code-page letters, compare exactly). Within an archive the
+// last of several same-named entries wins, and a path that stops on a
+// directory or passes through a file falls through to the next archive that
+// holds it as a file. Archive entries whose path has an empty, "." or ".."
+// segment, or whose name contains a separator, are not exposed: no lookup can
+// reach them.
+//
+// Loose files whose paths differ only in letter case (possible on
+// case-sensitive hosts, never on Windows, so never in the game) share one key;
+// the spelling walked last in byte order wins and the others stay as lower
+// layers.
 //
 // For multi-source layering (a base game, optional parent contexts and a writable
 // work folder overlaid on top) see NewLayered in layered.go.
@@ -44,19 +81,26 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/coreprime/kbot-io/formats/hpi"
+	"github.com/coreprime/kbot-io/formats/hpi/common"
 )
 
 // Config configures the virtual filesystem
 type Config struct {
 	// Extensions specifies which archive extensions to load
 	// Example: []string{".hpi", ".ufo", ".ccx", ".gp3"}
-	// If empty, defaults to all supported formats
+	// If empty, defaults to all supported formats. Files with a listed
+	// extension are treated as archives and never appear as loose files.
+	// Extensions beyond the four standard ones are loaded after them: in
+	// game-order discovery they are mounted after the game's own groups
+	// (lowest precedence), in all-archives discovery they load last (highest
+	// precedence), each group in name order.
 	Extensions []string
 
 	// ExcludeDirectories is a list of directory names to ignore (case-insensitive)
@@ -74,8 +118,55 @@ type Config struct {
 	// CaseSensitive controls path matching (default: false for TA compatibility)
 	CaseSensitive bool
 
-	// SkipErrors continues loading even if some archives fail
+	// SkipErrors continues loading even if some archives fail. Game-order
+	// discovery always skips archives the game would not mount; with
+	// all-archives discovery a failing archive aborts the load unless
+	// SkipErrors is set. Skipped archives are listed by SkippedArchives.
 	SkipErrors bool
+
+	// Discovery selects how a context directory's archives are found and
+	// ordered. The zero value is DiscoveryAuto.
+	Discovery DiscoveryMode
+
+	// GameVersion names the revision archive game-order discovery mounts
+	// first: rev<GameVersion>.gp3. Empty means "31" (TA 3.1c).
+	GameVersion string
+
+	// DiscRoots lists directories scanned after the game directory in
+	// game-order discovery, like the game's scan of its CD: the *.hpi files
+	// at the top level of each, in name order, with no count limit.
+	DiscRoots []string
+}
+
+// DiscoveryMode selects how a context directory's archives are discovered.
+type DiscoveryMode int
+
+const (
+	// DiscoveryAuto uses DiscoveryAllArchives when every archive at the top
+	// level of the directory is a TA: Kingdoms (version 2) archive, and
+	// DiscoveryGameOrder otherwise.
+	DiscoveryAuto DiscoveryMode = iota
+	// DiscoveryGameOrder mounts archives the way Total Annihilation 3.1c does
+	// (see the package documentation). The first mounted archive holding a
+	// path wins.
+	DiscoveryGameOrder
+	// DiscoveryAllArchives loads every archive under the directory tree in
+	// extension then name order; the last one loaded holding a path wins.
+	DiscoveryAllArchives
+)
+
+// String returns "auto", "game-order" or "all-archives".
+func (m DiscoveryMode) String() string {
+	switch m {
+	case DiscoveryAuto:
+		return "auto"
+	case DiscoveryGameOrder:
+		return "game-order"
+	case DiscoveryAllArchives:
+		return "all-archives"
+	default:
+		return fmt.Sprintf("DiscoveryMode(%d)", int(m))
+	}
 }
 
 // physicalSource is the layer label used for loose files found inside a context
@@ -107,19 +198,26 @@ type VirtualFileSystem struct {
 	config   *Config
 	archives []*archiveLayer
 
-	// filesMu guards files, fileLayers, directories, physicalFiles and seqCounter
-	// so background MD5 hashing and write operations don't race.
+	// filesMu guards files, fileLayers, directories, physicalFiles, layers and
+	// seqCounter so background MD5 hashing and write operations don't race.
 	filesMu       sync.RWMutex
 	files         map[string]*virtualFile // Map of normalized path -> active file
 	fileLayers    map[string][]FileLayer  // Map of path -> all layers containing it
 	directories   map[string]bool         // Set of directory paths
 	physicalFiles map[string]string       // Map of normalized path -> active physical path
 	seqCounter    int                     // Monotonic layer load sequence
+	layers        []*layerRecord          // Every loaded layer, in load order
+
+	// skipped lists archives that were found but not mounted.
+	skipped []SkippedArchive
+	// discovery records the mode each context directory was loaded with.
+	discovery []DiscoveryMode
 
 	// writeDir is the physical directory backing the writable overlay layer.
 	// It is empty for a read-only VFS (e.g. a bare context browsing tab).
 	writeDir      string
-	writableLabel string // FileLayer.Source label for the writable overlay
+	writableLabel string       // FileLayer.Source label for the writable overlay
+	writableLayer *layerRecord // the writable overlay's layer, if any
 
 	md5Hashes map[string]string // Map of normalized path -> MD5 hex hash
 	md5Mutex  sync.RWMutex      // Protects md5Hashes
@@ -134,7 +232,24 @@ type archiveLayer struct {
 	name        string
 	reader      hpi.Archive
 	archivePath string
+	seq         int
 	mu          sync.Mutex // Protects reader access
+}
+
+// layerRecord is one loaded layer: an archive, or a directory of loose files.
+type layerRecord struct {
+	seq     int
+	label   string
+	archive *archiveLayer // nil for loose layers
+	loose   []looseFile   // loose layers only
+}
+
+// looseFile is one file of a loose layer.
+type looseFile struct {
+	key      string // VFS key
+	stored   string // path relative to the layer root, '/'-separated, as on disk
+	physPath string
+	size     int64
 }
 
 // virtualFile represents the active version of a file in the VFS
@@ -143,6 +258,7 @@ type virtualFile struct {
 	size    int64
 	source  string // Archive name or "disk"
 	archive *archiveLayer
+	entry   *hpi.Entry
 }
 
 // NewVirtualFileSystem creates a read-only virtual filesystem over a single
@@ -186,10 +302,10 @@ func (vfs *VirtualFileSystem) nextSeq() int {
 
 // addDirs registers all parent directories of a normalized path.
 func (vfs *VirtualFileSystem) addDirs(normalized string) {
-	dir := filepath.Dir(normalized)
+	dir := path.Dir(normalized)
 	for dir != "." && dir != "/" && dir != "" {
 		vfs.directories[dir] = true
-		dir = filepath.Dir(dir)
+		dir = path.Dir(dir)
 	}
 }
 
@@ -209,6 +325,7 @@ func (vfs *VirtualFileSystem) setActiveFromLayer(normalized string, layer FileLa
 			size:    layer.Size,
 			source:  layer.Source,
 			archive: layer.archive,
+			entry:   layer.entry,
 		}
 		delete(vfs.physicalFiles, normalized)
 		return
@@ -221,114 +338,89 @@ func (vfs *VirtualFileSystem) setActiveFromLayer(normalized string, layer FileLa
 	vfs.physicalFiles[normalized] = layer.physPath
 }
 
-// loadArchivesFrom loads all archive files found under basePath in priority order.
-func (vfs *VirtualFileSystem) loadArchivesFrom(basePath string) error {
-	archivesByExt := make(map[string][]string) // extension -> []paths
-
-	err := filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-
-		ext := strings.ToLower(filepath.Ext(path))
-		for _, validExt := range vfs.config.Extensions {
-			if ext == strings.ToLower(validExt) {
-				archivesByExt[ext] = append(archivesByExt[ext], path)
-				break
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("failed to scan for archives: %w", err)
-	}
-
-	// Define extension priority order (lowest to highest).
-	extensionOrder := []string{".hpi", ".ccx", ".gp3", ".ufo"}
-
-	for _, ext := range extensionOrder {
-		paths, exists := archivesByExt[ext]
-		if !exists {
-			continue
-		}
-
-		// Sort files within the same extension by case-insensitive name, so the
-		// load order (and thus override precedence — later archives win) is
-		// stable regardless of letter case. TA:Kingdoms relies on this: data.hpi
-		// must be overlaid by IPData.hpi (case-sensitive byte order would put
-		// the upper-case "IPData" first, letting data.hpi clobber the Iron
-		// Plague overrides — e.g. the Creon side in gamedata/sidedata.tdf).
-		sort.Slice(paths, func(i, j int) bool {
-			ni, nj := strings.ToLower(filepath.Base(paths[i])), strings.ToLower(filepath.Base(paths[j]))
-			if ni != nj {
-				return ni < nj
-			}
-			return paths[i] < paths[j]
-		})
-
-		for _, path := range paths {
-			name := filepath.Base(path)
-			if err := vfs.loadArchive(name, path); err != nil {
-				if vfs.config.SkipErrors {
-					continue
-				}
-				return fmt.Errorf("failed to load archive %s: %w", name, err)
-			}
-		}
-	}
-
-	return nil
-}
-
-// loadArchive loads a single archive and adds its files to the VFS as one layer.
+// loadArchive opens a single archive of any version and adds its files to the
+// VFS as one layer.
 func (vfs *VirtualFileSystem) loadArchive(name, path string) error {
 	reader, err := hpi.OpenReader(path)
 	if err != nil {
 		return err
 	}
+	vfs.mountArchive(&archiveLayer{name: name, reader: reader, archivePath: path})
+	return nil
+}
 
-	layer := &archiveLayer{
-		name:        name,
-		reader:      reader,
-		archivePath: path,
-	}
+// mountArchive adds an open archive's files to the VFS as one layer. Only
+// entries a lookup can reach are registered: of several same-named entries
+// the last, and nothing below a directory hidden by a later sibling of the
+// same name. Entries whose path cannot be a safe key are left out.
+func (vfs *VirtualFileSystem) mountArchive(layer *archiveLayer) {
+	layer.seq = vfs.nextSeq()
 	vfs.archives = append(vfs.archives, layer)
+	vfs.layers = append(vfs.layers, &layerRecord{seq: layer.seq, label: layer.name, archive: layer})
 
-	seq := vfs.nextSeq()
-
-	return reader.Walk(func(entry *hpi.Entry) error {
+	_ = layer.reader.Root().WalkReachable(func(entry *hpi.Entry) error {
 		if entry.IsDir {
 			return nil
 		}
-
-		filePath := entry.FullPath()
-		if vfs.ShouldExclude(filePath, false) {
+		normalized, ok := vfs.archiveKey(entry)
+		if !ok {
 			return nil
 		}
-
-		normalized := vfs.normalizePath(filePath)
 		vfs.addDirs(normalized)
 		vfs.applyLayer(normalized, FileLayer{
-			Source:  name,
+			Source:  layer.name,
 			Size:    int64(entry.Size),
-			seq:     seq,
+			seq:     layer.seq,
 			archive: layer,
+			entry:   entry,
 		})
 		return nil
 	})
 }
 
-// scanLooseFrom scans for loose (non-archive) physical files under basePath and
-// records them as a single layer with the given source label.
-func (vfs *VirtualFileSystem) scanLooseFrom(basePath, label string) error {
-	seq := vfs.nextSeq()
+// archiveKey returns the VFS key for an archive entry, or false when the entry
+// is excluded or its path is not a safe key.
+func (vfs *VirtualFileSystem) archiveKey(entry *hpi.Entry) (string, bool) {
+	p := entry.FullPath()
+	if !safeVFSPath(p) || vfs.ShouldExclude(p, false) {
+		return "", false
+	}
+	return vfs.normalizePath(p), true
+}
 
-	return filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
+// safeVFSPath reports whether every '/'- or '\'-separated segment of p is
+// non-empty and neither "." nor "..".
+func safeVFSPath(p string) bool {
+	if p == "" {
+		return false
+	}
+	for _, segment := range strings.Split(strings.ReplaceAll(p, `\`, "/"), "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// scanLooseFrom scans for loose (non-archive) physical files under basePath and
+// records them as a single layer with the given source label. When
+// reportNested is set, archives found below the top level are reported as
+// skipped (game-order discovery never mounts them).
+func (vfs *VirtualFileSystem) scanLooseFrom(basePath, label string, reportNested bool) (*layerRecord, error) {
+	rec := &layerRecord{seq: vfs.nextSeq(), label: label}
+	vfs.layers = append(vfs.layers, rec)
+	exts := vfs.archiveExtSet()
+
+	err := filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			if path == basePath {
+				return err
+			}
+			// An unreadable subdirectory hides only its own contents.
+			if info != nil && info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
 		relPath, err := filepath.Rel(basePath, path)
@@ -339,14 +431,12 @@ func (vfs *VirtualFileSystem) scanLooseFrom(basePath, label string) error {
 			return nil
 		}
 
-		// Skip archive files; they are handled by loadArchivesFrom.
-		if !info.IsDir() {
-			ext := strings.ToLower(filepath.Ext(path))
-			for _, archiveExt := range vfs.config.Extensions {
-				if ext == strings.ToLower(archiveExt) {
-					return nil
-				}
+		// Skip archive files; they are handled by archive discovery.
+		if !info.IsDir() && exts[common.ToLowerASCII(filepath.Ext(path))] {
+			if reportNested && strings.ContainsRune(filepath.ToSlash(relPath), '/') && !vfs.ShouldExclude(relPath, false) {
+				vfs.skip(filepath.Base(path), path, SkipSubdirectory, "game-order discovery mounts only archives in the top-level game directory")
 			}
+			return nil
 		}
 
 		if vfs.ShouldExclude(relPath, info.IsDir()) {
@@ -366,24 +456,34 @@ func (vfs *VirtualFileSystem) scanLooseFrom(basePath, label string) error {
 		vfs.applyLayer(normalized, FileLayer{
 			Source:   label,
 			Size:     info.Size(),
-			seq:      seq,
+			seq:      rec.seq,
 			physPath: path,
+		})
+		rec.loose = append(rec.loose, looseFile{
+			key:      normalized,
+			stored:   filepath.ToSlash(relPath),
+			physPath: path,
+			size:     info.Size(),
 		})
 		return nil
 	})
+	return rec, err
 }
 
-// normalizePath normalizes a path for storage in the VFS
+// normalizePath normalizes a path for storage in the VFS: '\' becomes '/' on
+// every host, one leading '/' is dropped and, unless CaseSensitive is set,
+// the ASCII letters A-Z are lower-cased. Other bytes are kept as they are, so
+// names in a single-byte code page that differ only in accented letters stay
+// distinct.
 func (vfs *VirtualFileSystem) normalizePath(path string) string {
-	// Convert to forward slashes
-	path = filepath.ToSlash(path)
+	path = strings.ReplaceAll(path, `\`, "/")
 
 	// Remove leading slash
 	path = strings.TrimPrefix(path, "/")
 
 	// Case sensitivity
 	if !vfs.config.CaseSensitive {
-		path = strings.ToLower(path)
+		path = common.ToLowerASCII(path)
 	}
 
 	return path
@@ -407,11 +507,11 @@ func (vfs *VirtualFileSystem) ShouldExclude(filePath string, isDir bool) bool {
 	// Check file-specific exclusions (only for files, not directories)
 	if !isDir {
 		// Get just the filename (without directory path)
-		filename := filepath.Base(filePath)
+		filename := path.Base(normalizedPath)
 		filenameLower := strings.ToLower(filename)
 
 		// Check file extension (case-insensitive)
-		ext := strings.ToLower(filepath.Ext(filePath))
+		ext := strings.ToLower(path.Ext(filename))
 		for _, excludeExt := range vfs.config.ExcludeExtensions {
 			// Ensure extension starts with a dot
 			excludeExtLower := strings.ToLower(excludeExt)
@@ -453,7 +553,7 @@ func (vfs *VirtualFileSystem) Open(path string) (io.ReadCloser, error) {
 	}
 
 	// Archive file
-	if file.archive == nil {
+	if file.archive == nil || file.entry == nil {
 		return nil, fmt.Errorf("no archive for file: %s", path)
 	}
 
@@ -461,7 +561,7 @@ func (vfs *VirtualFileSystem) Open(path string) (io.ReadCloser, error) {
 	file.archive.mu.Lock()
 	defer file.archive.mu.Unlock()
 
-	return file.archive.reader.Open(file.path)
+	return file.archive.reader.OpenEntry(file.entry)
 }
 
 // Exists checks if a file or directory exists
@@ -519,7 +619,8 @@ func (vfs *VirtualFileSystem) Stat(path string) (*FileInfo, error) {
 	return nil, fmt.Errorf("path not found: %s", path)
 }
 
-// List returns all files in the VFS
+// List returns all files in the VFS, sorted, each once. It is not the game's
+// enumeration order; see ListGameOrder for that.
 func (vfs *VirtualFileSystem) List() []string {
 	vfs.filesMu.RLock()
 	files := make([]string, 0, len(vfs.files))
@@ -640,51 +741,54 @@ func (vfs *VirtualFileSystem) ReadFile(path string) ([]byte, error) {
 func (vfs *VirtualFileSystem) ReadFileFromSource(path, sourceName string) ([]byte, error) {
 	normalized := vfs.normalizePath(path)
 
-	// Resolve the physical path for a loose/overlay layer under the read lock.
+	// Resolve the layer under the read lock.
 	vfs.filesMu.RLock()
-	var physPath string
-	var physOK bool
+	var found FileLayer
+	ok := false
 	for _, l := range vfs.fileLayers[normalized] {
-		if l.Source == sourceName && l.archive == nil {
-			physPath = l.physPath
-			physOK = true
+		if l.Source == sourceName {
+			found, ok = l, true
 			break
 		}
 	}
 	vfs.filesMu.RUnlock()
 
-	if physOK {
-		data, err := os.ReadFile(physPath)
+	if ok && found.archive == nil {
+		data, err := os.ReadFile(found.physPath)
+		if err == nil {
+			vfs.recordBytesRead(int64(len(data)))
+		}
+		return data, err
+	}
+	if ok {
+		layer := found.archive
+		layer.mu.Lock()
+		defer layer.mu.Unlock()
+
+		rc, err := layer.reader.OpenEntry(found.entry)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = rc.Close() }()
+
+		data, err := io.ReadAll(rc)
 		if err == nil {
 			vfs.recordBytesRead(int64(len(data)))
 		}
 		return data, err
 	}
 
-	// Find matching archive layer (archives are immutable after load).
 	for _, layer := range vfs.archives {
 		if layer.name == sourceName {
-			layer.mu.Lock()
-			defer layer.mu.Unlock()
-
-			rc, err := layer.reader.Open(normalized)
-			if err != nil {
-				return nil, fmt.Errorf("file not found in %s", sourceName)
-			}
-			defer func() { _ = rc.Close() }()
-
-			data, err := io.ReadAll(rc)
-			if err == nil {
-				vfs.recordBytesRead(int64(len(data)))
-			}
-			return data, err
+			return nil, fmt.Errorf("file not found in %s", sourceName)
 		}
 	}
-
 	return nil, fmt.Errorf("source not found: %s", sourceName)
 }
 
-// Archives returns information about loaded archives
+// Archives returns the names of the loaded archives in load order: an archive
+// later in the list takes precedence over an earlier one. MountOrder gives the
+// same archives in lookup order with their paths.
 func (vfs *VirtualFileSystem) Archives() []string {
 	archives := make([]string, len(vfs.archives))
 	for i, archive := range vfs.archives {
@@ -726,6 +830,11 @@ func (vfs *VirtualFileSystem) Stats() map[string]interface{} {
 		compressionRatio = (1.0 - float64(totalPackedSize)/float64(totalUnpackedSize)) * 100
 	}
 
+	modes := make([]string, len(vfs.discovery))
+	for i, m := range vfs.discovery {
+		modes[i] = m.String()
+	}
+
 	return map[string]interface{}{
 		"archives":            len(vfs.archives),
 		"total_files":         totalFiles,
@@ -737,6 +846,8 @@ func (vfs *VirtualFileSystem) Stats() map[string]interface{} {
 		"compression_ratio":   compressionRatio,
 		"base_path":           vfs.basePath,
 		"archive_names":       vfs.Archives(),
+		"skipped_archives":    len(vfs.skipped),
+		"discovery":           strings.Join(modes, ","),
 	}
 }
 
@@ -749,14 +860,14 @@ func (vfs *VirtualFileSystem) DirectoryStats(dirPath string) map[string]interfac
 	totalSize := int64(0)
 
 	vfs.filesMu.RLock()
-	for path, file := range vfs.files {
-		if filepath.Dir(path) == dirPath {
+	for p, file := range vfs.files {
+		if path.Dir(p) == dirPath {
 			fileCount++
 			totalSize += file.size
 		}
 	}
 	for dir := range vfs.directories {
-		if filepath.Dir(dir) == dirPath {
+		if path.Dir(dir) == dirPath {
 			subdirCount++
 		}
 	}
@@ -817,6 +928,7 @@ type FileLayer struct {
 
 	seq      int           // Monotonic load sequence (higher = higher priority)
 	archive  *archiveLayer // Set for archive layers
+	entry    *hpi.Entry    // The archive entry, for archive layers
 	physPath string        // Set for physical/overlay layers
 }
 
@@ -832,7 +944,7 @@ func (vfs *VirtualFileSystem) GetFileLayers(path string) []FileLayer {
 	vfs.filesMu.RUnlock()
 
 	// Higher load sequence = higher priority (lower Priority number).
-	sort.Slice(result, func(i, j int) bool {
+	sort.SliceStable(result, func(i, j int) bool {
 		return result[i].seq > result[j].seq
 	})
 	for i := range result {
