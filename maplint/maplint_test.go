@@ -112,8 +112,8 @@ func TestSchemaSlotsGapInCoverage(t *testing.T) {
 	ota := &OTAInfo{
 		NumPlayers: "2, 4, 8",
 		Schemas: []SchemaInfo{
-			{Name: "Net2", StartPos: makeStarts(2)},
-			{Name: "Net4", StartPos: makeStarts(4)},
+			{Name: "Net2", Type: "Network 1", StartPos: makeStarts(2)},
+			{Name: "Net4", Type: "Network 1", StartPos: makeStarts(4)},
 		},
 	}
 	d := CheckSchemaSlotsVsPlayers(Input{OTA: ota})
@@ -129,9 +129,9 @@ func TestSchemaSlotsFullCoverage(t *testing.T) {
 	ota := &OTAInfo{
 		NumPlayers: "2, 4, 8",
 		Schemas: []SchemaInfo{
-			{Name: "Net2", StartPos: makeStarts(2)},
-			{Name: "Net4", StartPos: makeStarts(4)},
-			{Name: "Net8", StartPos: makeStarts(8)},
+			{Name: "Net2", Type: "Network 1", StartPos: makeStarts(2)},
+			{Name: "Net4", Type: "Network 2", StartPos: makeStarts(4)},
+			{Name: "Net8", Type: "network 3", StartPos: makeStarts(8)},
 		},
 	}
 	d := CheckSchemaSlotsVsPlayers(Input{OTA: ota})
@@ -143,7 +143,7 @@ func TestSchemaSlotsFullCoverage(t *testing.T) {
 func TestSchemaSlotsThinSchemaFailsHighCount(t *testing.T) {
 	ota := &OTAInfo{
 		NumPlayers: "8",
-		Schemas:    []SchemaInfo{{Name: "Thin", StartPos: makeStarts(4)}},
+		Schemas:    []SchemaInfo{{Name: "Thin", Type: "Network 1", StartPos: makeStarts(4)}},
 	}
 	d := CheckSchemaSlotsVsPlayers(Input{OTA: ota})
 	if d.Severity != SeverityWarning {
@@ -217,6 +217,10 @@ func TestParsePlayerCounts(t *testing.T) {
 		{"", nil},
 		{"foo", nil},
 		{"2; 4; 6", []int{2, 4, 6}},
+		{"2 3 4", []int{2, 3, 4}},
+		{"2-4", []int{2, 3, 4}},
+		{"2 to 4", []int{2, 3, 4}},
+		{"Any", nil},
 	} {
 		got := ParsePlayerCounts(c.in)
 		if len(got) != len(c.want) {

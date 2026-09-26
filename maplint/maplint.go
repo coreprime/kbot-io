@@ -10,6 +10,14 @@
 // The constants at the top tune the heuristics; the studio's UI
 // references the same values when wrapping diagnostics with auto-fix
 // metadata.
+//
+// The OTA checks follow TA 3.1c's rules. ParseOTA reads the file with the
+// game's grammar and keeps only the schemas the game can find (Schema 0,
+// Schema 1, ... up to the first missing number) and every start position
+// the game places, numbered its way (StartPos0 and unnumbered entries
+// included). CheckSchemaSlotsVsPlayers picks, for each advertised player
+// count, the schema a skirmish or multiplayer game would use: only Network 1
+// to Network 4 schemas take part (see MultiplayerSchema).
 package maplint
 
 import (
@@ -18,6 +26,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/coreprime/kbot-io/formats/gamedata/common"
+	"github.com/coreprime/kbot-io/formats/gamedata/ta"
 	"github.com/coreprime/kbot-io/formats/tnt"
 )
 
@@ -84,13 +94,23 @@ type Diagnostic struct {
 // StartPos mirrors TA's per-schema spawn point — game-pixel
 // coordinates (not attribute cells).
 type StartPos struct {
+	// Number is the number the game gives the start position (StartPos3
+	// is 3; see ta.StartPosition for entries with no number).
 	Number int
 	X, Z   int
+	// Slot is the player slot the game places at this position: Number-1,
+	// or 0 for StartPos0. ParseOTA fills it; callers building StartPos
+	// values themselves may leave it 0.
+	Slot int
 }
 
 // SchemaInfo carries the schema fields the checks read.  The studio
 // adapter pulls these from its saveRequest's nested otaSchema; the
 // CLI builds them by parsing an .ota file.
+//
+// The checks treat a list of schemas as the game's Schema 0, Schema 1, ...
+// in order, and Type as the schema's type: skirmish and multiplayer games
+// use only Network 1 to Network 4 schemas.
 type SchemaInfo struct {
 	Name         string
 	Type         string
@@ -107,6 +127,9 @@ type OTAInfo struct {
 	Size               string
 	SeaLevel           int
 	Schemas            []SchemaInfo
+	// UnreachableSchemas names schema sections the game never reads (after
+	// a gap in the numbering, or spelled otherwise than "Schema N").
+	UnreachableSchemas []string
 }
 
 // FeaturePlacement records where a named feature sits on the map in
@@ -456,66 +479,105 @@ func CheckMissingOTAFields(in Input) Diagnostic {
 	}
 }
 
-// CheckSchemaSlotsVsPlayers verifies every declared player count can
-// be hosted by at least one schema (i.e. its StartPos array has ≥
-// that many spawns).
+// CheckSchemaSlotsVsPlayers verifies that the game can host every player
+// count numplayers advertises. For each count it picks the schema the game
+// would use (see MultiplayerSchema) and flags a count whose schema has fewer
+// start positions than players, a map with no Network 1 to Network 4 schema
+// with start positions (skirmish and multiplayer games cannot use it) and
+// schema sections the game never reads.
 func CheckSchemaSlotsVsPlayers(in Input) Diagnostic {
 	const id = "schemaSlots"
 	const label = "Schema Player Slots"
-	if in.OTA == nil || len(in.OTA.Schemas) == 0 {
+	if in.OTA == nil || (len(in.OTA.Schemas) == 0 && len(in.OTA.UnreachableSchemas) == 0) {
 		return ok(id, label, "No schemas to check.")
 	}
+	var problems []string
+	if len(in.OTA.UnreachableSchemas) > 0 {
+		problems = append(problems, fmt.Sprintf("the game never reads %s (it reads Schema 0, Schema 1, ... up to the first missing number)",
+			strings.Join(in.OTA.UnreachableSchemas, ", ")))
+	}
+	schemas := in.OTA.Schemas
 	counts := ParsePlayerCounts(in.OTA.NumPlayers)
-	if len(counts) == 0 {
-		var thin []string
-		for i, s := range in.OTA.Schemas {
-			if len(s.StartPos) == 0 {
-				thin = append(thin, fmt.Sprintf("Schema %d", i+1))
+	var missing []string
+	if MultiplayerSchema(schemas, 0) < 0 {
+		problems = append(problems, "no Network 1 to Network 4 schema has start positions, so skirmish and multiplayer games cannot use the map")
+	} else {
+		for _, n := range counts {
+			i := MultiplayerSchema(schemas, n)
+			if have := len(schemas[i].StartPos); have < n {
+				missing = append(missing, strconv.Itoa(n))
+				problems = append(problems, fmt.Sprintf("for %d players the game uses schema %d (%s), which has %d start positions",
+					n, i, schemas[i].Type, have))
 			}
 		}
-		if len(thin) == 0 {
-			return ok(id, label, "Every schema has at least one start position.")
-		}
-		return Diagnostic{
-			ID: id, Label: label, Severity: SeverityWarning,
-			Message: "Schemas with zero starts: " + strings.Join(thin, ", "),
-		}
 	}
-	maxStarts := 0
-	for _, s := range in.OTA.Schemas {
-		if len(s.StartPos) > maxStarts {
-			maxStarts = len(s.StartPos)
+	if len(problems) == 0 {
+		if len(counts) == 0 {
+			return ok(id, label, "A Network schema with start positions is available.")
 		}
-	}
-	var missing []string
-	for _, n := range counts {
-		if maxStarts < n {
-			missing = append(missing, strconv.Itoa(n))
-		}
-	}
-	if len(missing) == 0 {
 		return ok(id, label, fmt.Sprintf("Schemas cover every player count (%s).", strings.Join(intsToStrings(counts), ", ")))
 	}
-	return Diagnostic{
-		ID: id, Label: label, Severity: SeverityWarning,
-		Message: fmt.Sprintf("No schema has enough starts for player count(s): %s", strings.Join(missing, ", ")),
+	msg := strings.Join(problems, "; ")
+	if len(missing) > 0 {
+		msg = fmt.Sprintf("No schema has enough starts for player count(s): %s — %s", strings.Join(missing, ", "), msg)
 	}
+	return Diagnostic{ID: id, Label: label, Severity: SeverityWarning, Message: msg}
+}
+
+// MultiplayerSchema returns the index in schemas of the schema a skirmish or
+// multiplayer game for this many players (0 for no particular number) uses,
+// or -1, choosing as the game does: it tries the types Network 1 to Network 4
+// in turn, each over the schemas in order; a schema qualifies when its Type
+// matches (ignoring case) and it has start positions. The last qualifying
+// schema with exactly players start positions wins; until one is found, each
+// qualifying schema with more start positions than the best so far replaces
+// it. schemas are taken as the game's Schema 0, Schema 1, ... in order.
+func MultiplayerSchema(schemas []SchemaInfo, players int) int {
+	best, bestCount := -1, 0
+	for _, typ := range ta.NetworkSchemaTypes {
+		for i, s := range schemas {
+			t := s.Type
+			if len(t) > 31 {
+				t = t[:31]
+			}
+			if !asciiEqualFold(t, typ) {
+				continue
+			}
+			count := len(s.StartPos)
+			if count != 0 && (count == players || players == 0 || (bestCount < count && bestCount != players)) {
+				best, bestCount = i, count
+			}
+		}
+	}
+	return best
+}
+
+func asciiEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		x, y := a[i], b[i]
+		if 'a' <= x && x <= 'z' {
+			x -= 'a' - 'A'
+		}
+		if 'a' <= y && y <= 'z' {
+			y -= 'a' - 'A'
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
 }
 
 // ── Helpers exported for callers that need to reuse the parsing ────────────
 
-// ParsePlayerCounts splits a numplayers string like "2, 3, 4" into
-// its individual integer entries.
+// ParsePlayerCounts reads the player counts a numplayers string like "2, 3,
+// 4" advertises, leniently: every number in it, with ranges such as "2-8"
+// expanded (see common.ParsePlayerCounts). The game only shows the text.
 func ParsePlayerCounts(s string) []int {
-	var out []int
-	for _, tok := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == ';' }) {
-		n, err := strconv.Atoi(strings.TrimSpace(tok))
-		if err != nil || n <= 0 {
-			continue
-		}
-		out = append(out, n)
-	}
-	return out
+	return common.ParsePlayerCounts(s)
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────────

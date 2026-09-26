@@ -1,13 +1,23 @@
 package common
 
+import "github.com/coreprime/kbot-io/formats/tdf"
+
 // UnitInfoBase is the set of [UNITINFO] fields common to TA and TA:Kingdoms
 // unit .fbi files. Game-specific UnitInfo types embed it and add their own
 // fields (resource economy, mana, localisation, nested adjust sections, ...).
+//
+// The fields hold the values as written, read with the game's number rules
+// (Atol for integers, Atof for floats). A key the file leaves out reads as 0
+// or "" here, while TA 3.1c applies its own default to many missing keys (a
+// missing StandingMoveOrder is 2, a missing ObjectName is the UnitName). Meta
+// records which keys were present, so an explicit 0 is written back and the
+// ta package's Effective accessors can apply the game's defaults and field
+// widths.
 type UnitInfoBase struct {
 	Key string `tdf:",name"` // section header, always UNITINFO
 
 	UnitName    string  `tdf:"unitname,omitempty"`
-	Version     float64 `tdf:"version,omitempty"` // Assuming float, due to name/usage
+	Version     float64 `tdf:"version,omitempty"`
 	Side        string  `tdf:"side,omitempty"`
 	ObjectName  string  `tdf:"objectname,omitempty"`
 	Name        string  `tdf:"name,omitempty"`
@@ -31,7 +41,7 @@ type UnitInfoBase struct {
 	MaxDamage     int     `tdf:"maxdamage,omitempty"`
 	MaxWaterDepth int     `tdf:"maxwaterdepth,omitempty"`
 	MaxSlope      int     `tdf:"maxslope,omitempty"`
-	WaterLine     float64 `tdf:"waterline,omitempty"` // Assuming float, due to name/usage
+	WaterLine     float64 `tdf:"waterline,omitempty"`
 
 	SightDistance int    `tdf:"sightdistance,omitempty"`
 	RadarDistance int    `tdf:"radardistance,omitempty"`
@@ -43,20 +53,20 @@ type UnitInfoBase struct {
 
 	// Movement.
 	MovementClass       string  `tdf:"movementclass,omitempty"`
-	MaxVelocity         float64 `tdf:"maxvelocity,omitempty"`  // Assuming float, due to name/usage
-	Acceleration        float64 `tdf:"acceleration,omitempty"` // Assuming float, due to name/usage
-	BrakeRate           float64 `tdf:"brakerate,omitempty"`    // Assuming float, due to name/usage
+	MaxVelocity         float64 `tdf:"maxvelocity,omitempty"`
+	Acceleration        float64 `tdf:"acceleration,omitempty"`
+	BrakeRate           float64 `tdf:"brakerate,omitempty"`
 	TurnRate            int     `tdf:"turnrate,omitempty"`
 	ManeuverLeashLength int     `tdf:"maneuverleashlength,omitempty"`
-	BankScale           float64 `tdf:"bankscale,omitempty"`  // Assuming float, due to name/usage
-	PitchScale          float64 `tdf:"pitchscale,omitempty"` // Assuming float, due to name/usage
+	BankScale           float64 `tdf:"bankscale,omitempty"`
+	PitchScale          float64 `tdf:"pitchscale,omitempty"`
 	Upright             int     `tdf:"upright,omitempty"`
 	MoveRate1           float64 `tdf:"moverate1,omitempty"` // walk-anim tier threshold, wu/frame
 	MoveRate2           float64 `tdf:"moverate2,omitempty"`
 
 	// Aircraft.
 	CanFly    int     `tdf:"canfly,omitempty"`
-	CruiseAlt float64 `tdf:"cruisealt,omitempty"` // Assuming float, due to name/usage
+	CruiseAlt float64 `tdf:"cruisealt,omitempty"`
 	Floater   int     `tdf:"floater,omitempty"`
 	CanHover  int     `tdf:"canhover,omitempty"`
 
@@ -88,6 +98,14 @@ type UnitInfoBase struct {
 
 	// Remaining preserves every other key=value so the file round-trips.
 	Remaining map[string]string `tdf:",remaining"`
+
+	// Sections preserves the sections nested in [UNITINFO] that no typed
+	// field takes, in order.
+	Sections []Section `tdf:",sections"`
+
+	// Meta records which keys the source had, in what order and with what
+	// text, so an explicit zero survives a round trip (see tdf.Meta).
+	Meta tdf.Meta `tdf:",meta"`
 }
 
 // UnitInfo is the read interface satisfied by every game's [UNITINFO] type via

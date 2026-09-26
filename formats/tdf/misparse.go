@@ -5,14 +5,16 @@ import (
 	"reflect"
 )
 
-// MisparsedKeys walks an already-decoded value and reports keys that fell
-// through to a ",remaining" catch-all map even though the enclosing struct
-// declares a typed field for that key. Unmarshal routes a value to the catch-all
-// when it cannot be parsed into its declared field type (see decodeFieldChild),
-// so the document still round-trips losslessly. Because the value is preserved,
-// a byte-level round-trip check cannot reveal the mismatch — but it means the
-// value landed in the catch-all instead of the field it was meant for, which is
-// almost always a mis-typed struct field (or genuinely malformed game data).
+// MisparsedKeys walks an already-decoded value and reports typed scalar fields
+// whose source text does not fit their type: text such as "13O" or "2, 4" in a
+// numeric field, "true" in a flag, or anything a custom scalar type refused.
+// The game reads such text with its own number rules (Atol, Atof, Flag), which
+// is what Unmarshal stores in the field; the text itself is kept (in the
+// struct's Meta, or otherwise in its ",remaining" catch-all) so the document
+// still round-trips. Because the text is preserved, a byte-level round-trip
+// check cannot reveal the mismatch, but it is almost always a mis-typed struct
+// field or genuinely malformed game data. Empty values and plain numerals (such
+// as "1.5" in an integer field) are not reported.
 //
 // Each result is formatted as "Type.key=value".
 func MisparsedKeys(v any) []string {
@@ -20,6 +22,11 @@ func MisparsedKeys(v any) []string {
 	seen := map[string]bool{}
 	walkMisparse(reflect.ValueOf(v), &out, seen)
 	return out
+}
+
+// misfit reports whether raw is text worth reporting for a field.
+func misfit(raw string) bool {
+	return raw != "" && !isNumeral(raw)
 }
 
 func walkMisparse(rv reflect.Value, out *[]string, seen map[string]bool) {
@@ -38,6 +45,24 @@ func walkMisparse(rv reflect.Value, out *[]string, seen map[string]bool) {
 		}
 	case reflect.Struct:
 		spec := specFor(rv.Type())
+		if meta := structMeta(rv, spec); meta != nil {
+			for _, fs := range spec.fields {
+				if fs.isName || fs.isRemaining || fs.isSections {
+					continue
+				}
+				f := rv.FieldByIndex(fs.index)
+				if categorize(f.Type()) != catScalar {
+					continue
+				}
+				raw, ok := meta.Raw(fs.key)
+				if !ok || !misfit(raw) {
+					continue
+				}
+				if same, parsed := decodesTo(f, raw, false, ""); (same || !parsed) && !rendersAlike(f, raw) {
+					*out = append(*out, fmt.Sprintf("%s.%s=%s", rv.Type().Name(), fs.key, raw))
+				}
+			}
+		}
 		if spec.remainingIndex != nil {
 			rem := rv.FieldByIndex(spec.remainingIndex)
 			if rem.Kind() == reflect.Map && !rem.IsNil() {
@@ -47,6 +72,10 @@ func walkMisparse(rv reflect.Value, out *[]string, seen map[string]bool) {
 					if _, ok := spec.fieldByName(name); !ok {
 						continue
 					}
+					raw := rem.MapIndex(k).String()
+					if !misfit(raw) {
+						continue
+					}
 					// The catch-all map is shared with embedded bases, so the
 					// same (map, key) can be visited via several struct levels.
 					dedup := fmt.Sprintf("%x|%s", id, name)
@@ -54,8 +83,7 @@ func walkMisparse(rv reflect.Value, out *[]string, seen map[string]bool) {
 						continue
 					}
 					seen[dedup] = true
-					*out = append(*out, fmt.Sprintf("%s.%s=%s",
-						rv.Type().Name(), name, rem.MapIndex(k).String()))
+					*out = append(*out, fmt.Sprintf("%s.%s=%s", rv.Type().Name(), name, raw))
 				}
 			}
 		}

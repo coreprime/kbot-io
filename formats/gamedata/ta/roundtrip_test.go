@@ -9,15 +9,19 @@ import (
 
 	"github.com/coreprime/kbot-io/formats/gamedata/common"
 	"github.com/coreprime/kbot-io/formats/tdf"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
-// taRoot returns the unpacked TA 3.1 game directory, or "" to skip.
-func taRoot() string { return os.Getenv("TA_UNPACKED_PATH") }
+// taRoot returns the unpacked TA 3.1c game directory. It fails the test when
+// TA_UNPACKED_PATH is unset, unless ALLOW_SKIP_ASSETS=true, which skips it.
+func taRoot(t *testing.T) string { return testutil.UnpackedPath(t) }
 
 // roundTripDir decodes every file under root/sub with one of exts into a fresh
-// value produced by newv, re-marshals it, and asserts the result is
-// semantically equal to the original. Files containing NUL bytes (compiled
-// binary blobs masquerading as text) are skipped.
+// value produced by newv, re-marshals it, and asserts that the game loads the
+// result exactly as it loads the original (tdf.SemanticEqual: every key the
+// source had is still present, explicit zeros included, and every value reads
+// the same). Files containing NUL bytes (compiled binary blobs masquerading as
+// text) are skipped.
 func roundTripDir(t *testing.T, root, sub string, exts map[string]bool, newv func() any) {
 	t.Helper()
 	dir := filepath.Join(root, sub)
@@ -104,59 +108,30 @@ func rel(root, path string) string {
 }
 
 func TestRoundTripWeapons(t *testing.T) {
-	root := taRoot()
-	if root == "" {
-		t.Skip("TA_UNPACKED_PATH not set")
-	}
-	exts := map[string]bool{".tdf": true}
-	// gamedata/weapons.tdf and any standalone weapons/*.tdf are []Weapon.
-	roundTripDir(t, root, "weapons", exts, func() any { return &[]Weapon{} })
-	data, err := os.ReadFile(filepath.Join(root, "gamedata", "weapons.tdf"))
-	if err != nil {
-		t.Skipf("gamedata/weapons.tdf: %v", err)
-	}
-	var weps []Weapon
-	if err := tdf.Unmarshal(data, &weps); err != nil {
-		t.Fatalf("weapons.tdf: unmarshal: %v", err)
-	}
-	out, err := tdf.Marshal(weps)
-	if err != nil {
-		t.Fatalf("weapons.tdf: marshal: %v", err)
-	}
-	if ok, msg := tdf.SemanticEqual(data, out); !ok {
-		t.Errorf("gamedata/weapons.tdf: %s", msg)
-	}
+	root := taRoot(t)
+	// The game loads weapons only from weapons/*.tdf; those are []Weapon.
+	// gamedata/weapons.tdf is never read by the game, so it is round-tripped
+	// as generic text in TestRoundTripGeneric.
+	roundTripDir(t, root, "weapons", map[string]bool{".tdf": true}, func() any { return &[]Weapon{} })
 }
 
 func TestRoundTripUnits(t *testing.T) {
-	root := taRoot()
-	if root == "" {
-		t.Skip("TA_UNPACKED_PATH not set")
-	}
+	root := taRoot(t)
 	roundTripDir(t, root, "units", map[string]bool{".fbi": true}, func() any { return &Unit{} })
 }
 
 func TestRoundTripFeatures(t *testing.T) {
-	root := taRoot()
-	if root == "" {
-		t.Skip("TA_UNPACKED_PATH not set")
-	}
+	root := taRoot(t)
 	roundTripDir(t, root, "features", map[string]bool{".tdf": true}, func() any { return &[]Feature{} })
 }
 
 func TestRoundTripGUIs(t *testing.T) {
-	root := taRoot()
-	if root == "" {
-		t.Skip("TA_UNPACKED_PATH not set")
-	}
+	root := taRoot(t)
 	roundTripDir(t, root, "guis", map[string]bool{".gui": true}, func() any { return &[]Gadget{} })
 }
 
 func TestRoundTripMaps(t *testing.T) {
-	root := taRoot()
-	if root == "" {
-		t.Skip("TA_UNPACKED_PATH not set")
-	}
+	root := taRoot(t)
 	// .ota files live under maps/ (and possibly elsewhere); scan the whole tree.
 	roundTripDir(t, root, ".", map[string]bool{".ota": true}, func() any { return &Map{} })
 }
@@ -206,43 +181,28 @@ func roundTripFileAt(t *testing.T, root, rel string, newv func() any) {
 }
 
 func TestRoundTripMoveInfo(t *testing.T) {
-	root := taRoot()
-	if root == "" {
-		t.Skip("TA_UNPACKED_PATH not set")
-	}
+	root := taRoot(t)
 	roundTripFile(t, root, "moveinfo.tdf", func() any { return &[]MovementClass{} })
 }
 
 func TestRoundTripCategories(t *testing.T) {
-	root := taRoot()
-	if root == "" {
-		t.Skip("TA_UNPACKED_PATH not set")
-	}
+	root := taRoot(t)
 	roundTripFile(t, root, "category.tdf", func() any { return &[]Category{} })
 }
 
 func TestRoundTripMeteor(t *testing.T) {
-	root := taRoot()
-	if root == "" {
-		t.Skip("TA_UNPACKED_PATH not set")
-	}
+	root := taRoot(t)
 	roundTripFile(t, root, "meteor.tdf", func() any { return &[]Meteor{} })
 }
 
 func TestRoundTripSounds(t *testing.T) {
-	root := taRoot()
-	if root == "" {
-		t.Skip("TA_UNPACKED_PATH not set")
-	}
+	root := taRoot(t)
 	roundTripFile(t, root, "sound.tdf", func() any { return &[]SoundClass{} })
 	roundTripFile(t, root, "allsound.tdf", func() any { return &[]SoundEvent{} })
 }
 
 func TestRoundTripSideData(t *testing.T) {
-	root := taRoot()
-	if root == "" {
-		t.Skip("TA_UNPACKED_PATH not set")
-	}
+	root := taRoot(t)
 	roundTripFile(t, root, "sidedata.tdf", func() any { return &[]Side{} })
 }
 
@@ -251,14 +211,11 @@ func TestRoundTripSideData(t *testing.T) {
 // translations, build/version stamps, campaign and download manifests). They
 // round-trip through the generic common.Section model.
 func TestRoundTripGeneric(t *testing.T) {
-	root := taRoot()
-	if root == "" {
-		t.Skip("TA_UNPACKED_PATH not set")
-	}
+	root := taRoot(t)
 	sec := func() any { return &[]common.Section{} }
 	for _, name := range []string{
 		"buildinfo.tdf", "help.tdf", "los.tdf",
-		"translate.tdf", "unitview.tdf", "version.tdf",
+		"translate.tdf", "unitview.tdf", "version.tdf", "weapons.tdf",
 	} {
 		roundTripFile(t, root, name, sec)
 	}

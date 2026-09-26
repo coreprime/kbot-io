@@ -5,12 +5,47 @@
 // different schema: a unit .fbi file is a document of sibling top-level
 // sections ([UNITINFO], [WEAPON1..3], [EXPLODEAS]) rather than a single
 // [UNITINFO]. Well-known keys are exposed as named fields; any remaining keys
-// are preserved in a Remaining map so every file round-trips losslessly. Fields
-// shared with Total Annihilation are factored into embedded base types from the
-// common package.
+// are preserved in a Remaining map and unmodelled sections in a Sections slice.
+// Fields shared with Total Annihilation are factored into embedded base types
+// from the common package.
+//
+// Every type carries a tdf.Meta, which records which keys and sections the
+// source had, their order and spelling, and each value's text, so Marshal
+// writes back explicit zeros and unchanged text and keeps the source's order.
+// Meta.Present tells a missing key from an explicit zero. The defaults TA:
+// Kingdoms applies to missing keys are not established, so this package, unlike
+// the ta package, has no Effective accessors; the fields hold the values as
+// written.
+//
+// # Reading TA: Kingdoms text
+//
+// The tdf package reads every file with the TA 3.1c grammar by default, and
+// that includes TA: Kingdoms data; whether TA: Kingdoms' own reader follows
+// the same rules in every case is not established. Three retail TA: Kingdoms
+// files read differently under that grammar than under the line-based reader
+// of earlier versions of this module, because stray text joins the key that
+// follows it:
+//
+//   - features/zhon/zonruin.tdf: a line holding only ';' joins the next key,
+//     so [ZonRuin12] loses its damage value;
+//   - translate/messages.tdf: a ';' inside the French text of
+//     [DO_YOU_WANT_TO_WATCH_GAME] ends that value, and the rest joins the
+//     Italian key, which is lost;
+//   - translate/customkeys.tdf: "English = ;;" in [SYMBOL_3B] swallows the
+//     [SYMBOL_3C] section that follows.
+//
+// Callers who want the earlier handling, which drops such stray text, can read
+// with tdf.UnmarshalWith(data, &v, tdf.ParseOptions{SkipStrayText: true}) or
+// tdf.ParseWith. ParseOptions.Strict applies the TA 3.1c rules for refusing a
+// file, so it refuses those files and TA: Kingdoms' .gui files, which are not
+// TDF text at all (they are lists of numbers and names; the default reader
+// finds no fields in them).
 package tak
 
-import "github.com/coreprime/kbot-io/formats/gamedata/common"
+import (
+	"github.com/coreprime/kbot-io/formats/gamedata/common"
+	"github.com/coreprime/kbot-io/formats/tdf"
+)
 
 // UnitInfo is the [UNITINFO] section of a TA:Kingdoms unit .fbi file. Fields
 // shared with Total Annihilation live on the embedded common.UnitInfoBase; the
@@ -23,24 +58,24 @@ type UnitInfo struct {
 	Model    string `tdf:"model,omitempty"`
 
 	BuildCost        int     `tdf:"buildcost,omitempty"`
-	BuildTime        float64 `tdf:"buildtime,omitempty"` // Assuming float, due to name/usage
+	BuildTime        float64 `tdf:"buildtime,omitempty"`
 	ExperiencePoints int     `tdf:"experiencepoints,omitempty"`
 
-	HealTime       float64 `tdf:"healtime,omitempty"` // Assuming float, due to name/usage
+	HealTime       float64 `tdf:"healtime,omitempty"`
 	DamageCategory string  `tdf:"damagecategory,omitempty"`
 
 	MaxMana          int     `tdf:"maxmana,omitempty"`
-	ManaRechargeRate float64 `tdf:"manarechargerate,omitempty"` // Assuming float, due to name/usage
+	ManaRechargeRate float64 `tdf:"manarechargerate,omitempty"`
 	MogriumStorage   int     `tdf:"mogriumstorage,omitempty"`
-	MogriumIncome    float64 `tdf:"mogriumincome,omitempty"` // Assuming float, due to name/usage
+	MogriumIncome    float64 `tdf:"mogriumincome,omitempty"`
 
 	SoundClass string `tdf:"soundclass,omitempty"`
 	ShadowGAF  string `tdf:"shadowgaf,omitempty"`
 
 	// Movement.
 	TurnInPlaceRate int     `tdf:"turninplacerate,omitempty"`
-	WaterMultiplier float64 `tdf:"watermultiplier,omitempty"` // Assuming float, due to name/usage
-	RoadMultiplier  float64 `tdf:"roadmultiplier,omitempty"`  // Assuming float, due to name/usage
+	WaterMultiplier float64 `tdf:"watermultiplier,omitempty"`
+	RoadMultiplier  float64 `tdf:"roadmultiplier,omitempty"`
 
 	// Orders / behaviour flags.
 	CanReclaim        int `tdf:"canreclaim,omitempty"`
@@ -72,13 +107,20 @@ var _ common.UnitInfo = (*UnitInfo)(nil)
 // Adjust is an area-effect ability subsection of [UNITINFO]
 // ([AdjustJoy], [AdjustArmor], [AdjustAttack]).
 type Adjust struct {
-	Adjustment        float64 `tdf:"adjustment,omitempty"` // Assuming float, due to name/usage
+	Adjustment        float64 `tdf:"adjustment,omitempty"`
 	AffectsEnemy      int     `tdf:"affectsenemy,omitempty"`
 	EdgeEffectiveness float64 `tdf:"edgeeffectiveness,omitempty"`
 	Radius            int     `tdf:"radius,omitempty"`
 
 	// Remaining preserves any other key=value so the file round-trips.
 	Remaining map[string]string `tdf:",remaining"`
+
+	// Sections preserves any section nested in the ability.
+	Sections []common.Section `tdf:",sections"`
+
+	// Meta records which keys the source had, in what order and with what
+	// text, so an explicit zero survives a round trip (see tdf.Meta).
+	Meta tdf.Meta `tdf:",meta"`
 }
 
 // Weapon is a [WEAPONn] section of a TA:Kingdoms unit .fbi file. Fields shared
@@ -92,7 +134,7 @@ type Weapon struct {
 	MinRange int    `tdf:"minrange,omitempty"`
 
 	AimTolerance int     `tdf:"aimtolerance,omitempty"`
-	ManaPerShot  float64 `tdf:"manapershot,omitempty"` // Assuming float, due to name/usage
+	ManaPerShot  float64 `tdf:"manapershot,omitempty"`
 
 	DamageType          string `tdf:"damagetype,omitempty"`
 	ExplosionClass      string `tdf:"explosionclass,omitempty"`
@@ -139,6 +181,13 @@ type ExplodeAs struct {
 
 	// Remaining preserves every other key=value so the file round-trips.
 	Remaining map[string]string `tdf:",remaining"`
+
+	// Sections preserves any other section nested in [EXPLODEAS].
+	Sections []common.Section `tdf:",sections"`
+
+	// Meta records which keys the source had, in what order and with what
+	// text, so an explicit zero survives a round trip (see tdf.Meta).
+	Meta tdf.Meta `tdf:",meta"`
 }
 
 // Unit wraps a TA:Kingdoms unit .fbi file: one [UNITINFO] plus up to three
@@ -147,9 +196,19 @@ type ExplodeAs struct {
 //	var u tak.Unit
 //	err := tdf.Unmarshal(data, &u)
 type Unit struct {
-	Info      UnitInfo   `tdf:"unitinfo"`
-	Weapon1   *Weapon    `tdf:"weapon1,omitempty"`
-	Weapon2   *Weapon    `tdf:"weapon2,omitempty"`
-	Weapon3   *Weapon    `tdf:"weapon3,omitempty"`
-	ExplodeAs *ExplodeAs `tdf:"explodeas,omitempty"`
+	Info      UnitInfo   `tdf:"UNITINFO"`
+	Weapon1   *Weapon    `tdf:"WEAPON1,omitempty"`
+	Weapon2   *Weapon    `tdf:"WEAPON2,omitempty"`
+	Weapon3   *Weapon    `tdf:"WEAPON3,omitempty"`
+	ExplodeAs *ExplodeAs `tdf:"EXPLODEAS,omitempty"`
+
+	// Sections preserves every other top-level section, including a second
+	// section of one of the names above, in order.
+	Sections []common.Section `tdf:",sections"`
+
+	// Remaining preserves any key=value outside the sections.
+	Remaining map[string]string `tdf:",remaining"`
+
+	// Meta records the source's section order and spelling (see tdf.Meta).
+	Meta tdf.Meta `tdf:",meta"`
 }

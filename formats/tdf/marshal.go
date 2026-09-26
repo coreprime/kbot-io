@@ -12,6 +12,16 @@ import (
 // pointer to either. A slice produces one top-level [section] per element
 // (named by its `tdf:",name"` field); a struct produces its tagged fields and
 // nested sections at the top level. The inverse of Unmarshal.
+//
+// A zero field tagged omitempty is left out unless the struct's Meta records
+// the key as present; a nil pointer or nil map is always left out. With a Meta,
+// unchanged values keep their source text and keys and sections their source
+// order and spelling (see Meta). Without one, fields are written in struct
+// order, then catch-all entries sorted by key.
+//
+// Marshal refuses a key, value or section name the game would not read back
+// unchanged (see CheckKey, CheckValue and CheckName), NaN, and integers outside
+// the 32-bit range the game reads.
 func Marshal(v any) ([]byte, error) {
 	rv := reflect.ValueOf(v)
 	for rv.Kind() == reflect.Pointer {
@@ -65,9 +75,43 @@ func encodeElement(rv reflect.Value) (*element, error) {
 	return &element{key: name, section: true, children: children}, nil
 }
 
+// structMeta returns the struct's Meta, or nil when it has none.
+func structMeta(rv reflect.Value, spec structSpec) *Meta {
+	if spec.metaIndex == nil {
+		return nil
+	}
+	f := rv.FieldByIndex(spec.metaIndex)
+	if f.Kind() == reflect.Pointer {
+		if f.IsNil() {
+			return nil
+		}
+		return f.Interface().(*Meta)
+	}
+	m := f.Interface().(Meta)
+	return &m
+}
+
+// encoder is the per-struct state of encodeStruct.
+type encoder struct {
+	meta      *Meta
+	remaining reflect.Value
+	remKeys   map[string]string // folded key -> key in remaining
+	consumed  map[string]bool   // folded remaining keys a typed field handled
+}
+
 // encodeStruct renders a struct's tagged fields to an ordered element list.
 func encodeStruct(rv reflect.Value) ([]*element, error) {
 	spec := specFor(rv.Type())
+	enc := &encoder{meta: structMeta(rv, spec), consumed: map[string]bool{}}
+	if spec.remainingIndex != nil {
+		enc.remaining = rv.FieldByIndex(spec.remainingIndex)
+		enc.remKeys = map[string]string{}
+		if !enc.remaining.IsNil() {
+			for _, k := range enc.remaining.MapKeys() {
+				enc.remKeys[foldKey(k.String())] = k.String()
+			}
+		}
+	}
 	var out []*element
 
 	for _, fs := range spec.fields {
@@ -75,25 +119,15 @@ func encodeStruct(rv reflect.Value) ([]*element, error) {
 			continue
 		}
 		f := rv.FieldByIndex(fs.index)
-		switch categorize(f.Type()) {
-		case catScalar:
-			s, zero, err := getScalar(f)
+		switch cat := categorize(f.Type()); cat {
+		case catScalar, catScalarList:
+			el, err := enc.scalar(fs, f, cat == catScalarList)
 			if err != nil {
 				return nil, err
 			}
-			if fs.omitempty && zero {
-				continue
+			if el != nil {
+				out = append(out, el)
 			}
-			out = append(out, &element{key: fs.key, value: s})
-		case catScalarList:
-			if fs.omitempty && f.Len() == 0 {
-				continue
-			}
-			v, err := encodeScalarList(f, fs.delimiter)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, &element{key: fs.key, value: v})
 		case catSection:
 			if f.Kind() == reflect.Pointer && f.IsNil() {
 				continue
@@ -106,78 +140,263 @@ func encodeStruct(rv reflect.Value) ([]*element, error) {
 			if err != nil {
 				return nil, err
 			}
-			if fs.omitempty && len(children) == 0 {
+			if fs.omitempty && len(children) == 0 && !enc.meta.HasSection(fs.key) {
 				continue
 			}
-			out = append(out, &element{key: fs.key, section: true, children: children})
+			out = append(out, &element{key: enc.sectionName(fs.key), section: true, children: children})
 		case catRepeated:
 			// A repeats= field emits a sibling count key (e.g. SCHEMACOUNT=2)
 			// ahead of the blocks, matching the on-disk layout.
 			if fs.countKey != "" {
-				out = append(out, &element{key: fs.countKey, value: strconv.Itoa(f.Len())})
-			}
-			for i := 0; i < f.Len(); i++ {
-				el, err := encodeElement(f.Index(i))
-				if err != nil {
-					return nil, err
+				if el := enc.count(fs.countKey, f.Len()); el != nil {
+					out = append(out, el)
 				}
-				if el.key == "" {
-					el.key = fmt.Sprintf("%s%d", fs.key, i)
-				}
-				out = append(out, el)
 			}
-		case catMap:
-			children, err := encodeMap(f)
+			els, err := encodeElements(f, fs.key)
 			if err != nil {
 				return nil, err
 			}
-			if fs.omitempty && len(children) == 0 {
+			out = append(out, els...)
+		case catMap:
+			if f.IsNil() {
 				continue
 			}
-			out = append(out, &element{key: fs.key, section: true, children: children})
+			var sub *Meta
+			if i := enc.meta.sectionIndex(fs.key, 0); i >= 0 {
+				sub = enc.meta.entries[i].sub
+			}
+			children, err := encodeMap(f, sub)
+			if err != nil {
+				return nil, err
+			}
+			if fs.omitempty && len(children) == 0 && !enc.meta.HasSection(fs.key) {
+				continue
+			}
+			out = append(out, &element{key: enc.sectionName(fs.key), section: true, children: children})
 		}
 	}
 
 	if spec.sectionsIndex != nil {
-		f := rv.FieldByIndex(spec.sectionsIndex)
-		for i := 0; i < f.Len(); i++ {
-			el, err := encodeElement(f.Index(i))
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, el)
+		els, err := encodeElements(rv.FieldByIndex(spec.sectionsIndex), spec.sectionsStem)
+		if err != nil {
+			return nil, err
 		}
+		out = append(out, els...)
 	}
 
-	if spec.remainingIndex != nil {
-		out = append(out, encodeRemaining(rv.FieldByIndex(spec.remainingIndex))...)
+	if enc.remaining.IsValid() && !enc.remaining.IsNil() {
+		keys := enc.remaining.MapKeys()
+		sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
+		for _, k := range keys {
+			if enc.consumed[foldKey(k.String())] {
+				continue
+			}
+			out = append(out, &element{key: k.String(), value: enc.remaining.MapIndex(k).String()})
+		}
+	}
+	return orderByMeta(out, enc.meta), nil
+}
+
+// encodeElements renders the elements of a repeated-section field or a
+// `,sections` catch-all, naming unnamed ones as ElementNames does.
+func encodeElements(f reflect.Value, stem string) ([]*element, error) {
+	out := make([]*element, f.Len())
+	names := make([]string, f.Len())
+	for i := range out {
+		el, err := encodeElement(f.Index(i))
+		if err != nil {
+			return nil, err
+		}
+		out[i], names[i] = el, el.key
+	}
+	for i, name := range ElementNames(stem, names) {
+		out[i].key = name
 	}
 	return out, nil
 }
 
-func encodeMap(f reflect.Value) ([]*element, error) {
+// ElementNames returns the section names Marshal writes for the elements of a
+// repeated-section field, or of a `,sections` catch-all, whose tag key is
+// stem, given the names the elements hold (their `,name` fields) in order.
+// An element with a name keeps it. An unnamed element is named stem followed
+// by the lowest number that gives a name no other element of the field has
+// (compared ignoring ASCII case), taking the unnamed elements in order: three
+// unnamed elements of `tdf:"special,sections"` are written as [special0],
+// [special1] and [special2], and an unnamed one next to [Schema 0] of
+// `tdf:"Schema "` as [Schema 1]. With an empty stem an unnamed element stays
+// unnamed and is written as [].
+func ElementNames(stem string, names []string) []string {
+	out := append([]string(nil), names...)
+	if stem == "" {
+		return out
+	}
+	used := map[string]bool{}
+	for _, n := range names {
+		if n != "" {
+			used[foldKey(n)] = true
+		}
+	}
+	next := 0
+	for i, n := range out {
+		if n != "" {
+			continue
+		}
+		for used[foldKey(stem+strconv.Itoa(next))] {
+			next++
+		}
+		out[i] = stem + strconv.Itoa(next)
+		used[foldKey(out[i])] = true
+		next++
+	}
+	return out
+}
+
+// count returns the count key a repeats= field writes, or nil. A struct with a
+// catch-all writes the key from there, as it stands, when it holds one; a
+// struct without one writes the text its Meta recorded. Otherwise the key is
+// written with the number of elements, unless the struct was decoded from a
+// source that had no such key.
+func (enc *encoder) count(key string, n int) *element {
+	if enc.remaining.IsValid() {
+		if _, ok := enc.remKeys[foldKey(key)]; ok {
+			return nil
+		}
+	} else if e := enc.meta.field(key); e != nil && e.hasRaw {
+		return &element{key: e.key, value: e.raw}
+	}
+	if enc.meta.Decoded() {
+		return nil
+	}
+	if e := enc.meta.field(key); e != nil {
+		key = e.key
+	}
+	return &element{key: key, value: strconv.Itoa(n)}
+}
+
+// sectionName is the spelling to write for a single section: the source's
+// when the Meta has it.
+func (enc *encoder) sectionName(key string) string {
+	if i := enc.meta.sectionIndex(key, 0); i >= 0 {
+		return enc.meta.entries[i].key
+	}
+	return key
+}
+
+// scalar renders one scalar or scalar-list field, or returns nil when it is
+// left out. A value still equal to the text it was read from (kept in the Meta
+// or, without one, in the catch-all) is written as that text.
+func (enc *encoder) scalar(fs fieldSpec, f reflect.Value, list bool) (*element, error) {
+	key := fs.key
+	var raw string
+	hasRaw := false
+	if e := enc.meta.field(fs.key); e != nil {
+		key = e.key
+		raw, hasRaw = e.raw, e.hasRaw
+	}
+	if rk, ok := enc.remKeys[fs.ukey]; ok {
+		enc.consumed[fs.ukey] = true
+		if !hasRaw {
+			key, raw, hasRaw = rk, enc.remaining.MapIndex(reflect.ValueOf(rk)).String(), true
+		}
+	}
+	if hasRaw {
+		same, parsed := decodesTo(f, raw, list, fs.delimiter)
+		// Text that does not parse at all can only have come from a type
+		// that parses itself; while its field is still zero, keep the text.
+		if same || (!parsed && f.IsZero()) {
+			return &element{key: key, value: raw}, nil
+		}
+	}
+	if f.Kind() == reflect.Pointer && f.IsNil() {
+		return nil, nil
+	}
+	present := enc.meta.Present(fs.key)
+	if list {
+		if fs.omitempty && f.Len() == 0 && !present {
+			return nil, nil
+		}
+		v, err := encodeScalarList(f, fs.delimiter)
+		if err != nil {
+			return nil, err
+		}
+		return &element{key: key, value: v}, nil
+	}
+	s, zero, err := getScalar(f)
+	if err != nil {
+		return nil, fmt.Errorf("%w (key %s)", err, fs.key)
+	}
+	if fs.omitempty && zero && !present {
+		return nil, nil
+	}
+	return &element{key: key, value: s}, nil
+}
+
+// encodeMap renders a map-typed section. With a Meta for the section, keys it
+// recorded come first in source order and unchanged values keep their text;
+// other keys follow sorted.
+//
+// Sections nested in the source section, which a map cannot hold, are kept in
+// sub and written back unchanged in their place.
+func encodeMap(f reflect.Value, sub *Meta) ([]*element, error) {
 	keys := f.MapKeys()
 	sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
 	out := make([]*element, 0, len(keys))
+	if sub != nil {
+		for _, e := range sub.entries {
+			if e.section && e.el != nil {
+				out = append(out, e.el)
+			}
+		}
+	}
 	for _, k := range keys {
-		s, _, err := getScalar(f.MapIndex(k))
+		v := f.MapIndex(k)
+		if e := sub.field(k.String()); e != nil && e.hasRaw {
+			if same, _ := decodesTo(v, e.raw, false, ""); same {
+				out = append(out, &element{key: k.String(), value: e.raw})
+				continue
+			}
+		}
+		s, _, err := getScalar(v)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, &element{key: k.String(), value: s})
 	}
-	return out, nil
+	return orderByMeta(out, sub), nil
 }
 
-func encodeRemaining(f reflect.Value) []*element {
-	if f.IsNil() {
-		return nil
+// orderByMeta sorts elements into the order m recorded: fields by the
+// position of their key, the n-th section of a name by the position of the
+// source's n-th section of that name. Elements m does not know keep their
+// relative order after all the others.
+func orderByMeta(els []*element, m *Meta) []*element {
+	if m == nil || len(m.entries) == 0 || len(els) < 2 {
+		return els
 	}
-	keys := f.MapKeys()
-	sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
-	out := make([]*element, 0, len(keys))
-	for _, k := range keys {
-		out = append(out, &element{key: k.String(), value: f.MapIndex(k).String()})
+	pos := make([]int, len(els))
+	seen := map[string]int{}
+	for i, el := range els {
+		var p int
+		if el.section {
+			u := foldKey(el.key)
+			p = m.sectionIndex(el.key, seen[u])
+			seen[u]++
+		} else {
+			p = m.fieldIndex(el.key)
+		}
+		if p < 0 {
+			p = len(m.entries) + i
+		}
+		pos[i] = p
+	}
+	idx := make([]int, len(els))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return pos[idx[a]] < pos[idx[b]] })
+	out := make([]*element, len(els))
+	for i, j := range idx {
+		out[i] = els[j]
 	}
 	return out
 }

@@ -86,3 +86,110 @@ func rel(root, path string) string {
 	}
 	return path
 }
+
+// metaSection is a generic section that records its source with a Meta.
+type metaSection struct {
+	Key      string            `tdf:",name"`
+	Values   map[string]string `tdf:",remaining"`
+	Children []metaSection     `tdf:",sections"`
+	Meta     Meta              `tdf:",meta"`
+}
+
+// TestDocumentAndMetaAllGameFiles checks, on every text file of the configured
+// game directories, that the Document tree and a Meta-bearing struct both
+// re-emit what the game reads (strict SemanticEqual), that an unchanged
+// Document gives its source back byte for byte, and that Bytes can edit it in
+// place.
+func TestDocumentAndMetaAllGameFiles(t *testing.T) {
+	for _, g := range []struct {
+		env      string
+		kingdoms bool
+	}{
+		{"TA_UNPACKED_PATH", false},
+		{"TAK_UNPACKED_PATH", true},
+	} {
+		root := os.Getenv(g.env)
+		if root == "" {
+			t.Logf("%s not set; skipping", g.env)
+			continue
+		}
+		exts := gameTDFExtensions(g.kingdoms)
+		t.Run(g.env, func(t *testing.T) {
+			var total, failed int
+			fail := func(path, format string, args ...any) {
+				failed++
+				if failed <= 20 {
+					t.Errorf("%s: "+format, append([]any{rel(root, path)}, args...)...)
+				}
+			}
+			err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+				if err != nil || d.IsDir() || !exts[strings.ToLower(filepath.Ext(path))] {
+					return nil
+				}
+				data, err := os.ReadFile(path)
+				if err != nil || bytes.IndexByte(data, 0) >= 0 {
+					return nil
+				}
+				total++
+				doc, err := Parse(bytes.NewReader(data))
+				if err != nil {
+					fail(path, "parse: %v", err)
+					return nil
+				}
+				if same, err := doc.Bytes(); err != nil || !bytes.Equal(same, data) {
+					fail(path, "unchanged Bytes differs from the source: %v", err)
+				}
+				// Edit every section in place. Bytes checks that the result
+				// reads back as the edited document; for a file the game
+				// accepts it must also manage to make every change.
+				edited, _ := Parse(bytes.NewReader(data))
+				editEverySection(edited.Root())
+				edited.AddSection("KBOTIO_ADDED").SetInt("x", 1)
+				if _, err := edited.Bytes(); err != nil {
+					if _, strictErr := ParseWith(bytes.NewReader(data), ParseOptions{Strict: true}); strictErr == nil {
+						fail(path, "in-place edit: %v", err)
+					}
+				}
+				var w bytes.Buffer
+				if err := doc.Write(&w); err != nil {
+					fail(path, "write: %v", err)
+				} else if ok, msg := SemanticEqual(data, w.Bytes()); !ok {
+					fail(path, "Document.Write: %s", msg)
+				}
+				var v metaSection
+				if err := Unmarshal(data, &v); err != nil {
+					fail(path, "unmarshal: %v", err)
+					return nil
+				}
+				out, err := Marshal(&v)
+				if err != nil {
+					fail(path, "marshal: %v", err)
+				} else if ok, msg := SemanticEqual(data, out); !ok {
+					fail(path, "Meta round trip: %s", msg)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("walk: %v", err)
+			}
+			t.Logf("%s: %d files checked, %d failed", g.env, total, failed)
+		})
+	}
+}
+
+// editEverySection changes the first field of s and of every section below it
+// (to a value ending in '/', which must not join a comment that follows),
+// deletes the second and adds a field.
+func editEverySection(s *Section) {
+	fields := s.Fields()
+	if len(fields) > 0 {
+		s.Set(fields[0].Key(), "edited/")
+	}
+	if len(fields) > 1 {
+		s.Delete(fields[1].Key())
+	}
+	s.SetInt("kbotio_added", 1)
+	for _, c := range s.Sections() {
+		editEverySection(c)
+	}
+}

@@ -2,6 +2,7 @@ package tdf
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -33,12 +34,11 @@ func isCustomScalar(t reflect.Type) bool {
 		pt.Implements(scalarMarshalerType) || pt.Implements(scalarUnmarshalerType)
 }
 
-// setScalar assigns a TDF string value to a scalar (or pointer-to-scalar) field.
-// Shorthand floats such as ".6" are accepted because strconv.ParseFloat handles
-// a missing leading zero. Integer fields tolerate a float-formatted value by
-// truncating, so a mistyped struct field surfaces as a round-trip mismatch
-// rather than a hard parse failure. Types implementing ScalarUnmarshaler parse
-// themselves.
+// setScalar assigns a TDF value to a scalar (or pointer-to-scalar) field the
+// way the game reads it: integers with Atol (wrapping to 32 bits, then keeping
+// the low bits of narrower fields), floats with Atof and booleans with Flag
+// (bit 0 of Atol). None of these fail. Only a type implementing
+// ScalarUnmarshaler, which parses itself, can return an error.
 func setScalar(f reflect.Value, s string) error {
 	if f.Kind() != reflect.Pointer && f.CanAddr() {
 		if u, ok := f.Addr().Interface().(ScalarUnmarshaler); ok {
@@ -57,45 +57,13 @@ func setScalar(f reflect.Value, s string) error {
 	case reflect.String:
 		f.SetString(s)
 	case reflect.Bool:
-		f.SetBool(parseTDFBool(s))
+		f.SetBool(Flag(s))
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		if s == "" {
-			f.SetInt(0)
-			return nil
-		}
-		if i, err := strconv.ParseInt(s, 10, 64); err == nil {
-			f.SetInt(i)
-			return nil
-		}
-		fl, err := strconv.ParseFloat(s, 64)
-		if err != nil {
-			return fmt.Errorf("invalid integer %q", s)
-		}
-		f.SetInt(int64(fl))
+		f.SetInt(int64(Atol(s)))
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		if s == "" {
-			f.SetUint(0)
-			return nil
-		}
-		if u, err := strconv.ParseUint(s, 10, 64); err == nil {
-			f.SetUint(u)
-			return nil
-		}
-		fl, err := strconv.ParseFloat(s, 64)
-		if err != nil {
-			return fmt.Errorf("invalid unsigned integer %q", s)
-		}
-		f.SetUint(uint64(fl))
+		f.SetUint(uint64(uint32(Atol(s))))
 	case reflect.Float32, reflect.Float64:
-		if s == "" {
-			f.SetFloat(0)
-			return nil
-		}
-		fl, err := strconv.ParseFloat(s, 64)
-		if err != nil {
-			return fmt.Errorf("invalid float %q", s)
-		}
-		f.SetFloat(fl)
+		f.SetFloat(Atof(s))
 	default:
 		return fmt.Errorf("unsupported scalar kind %s", f.Kind())
 	}
@@ -107,6 +75,11 @@ func setScalar(f reflect.Value, s string) error {
 // ScalarMarshaler render themselves; a non-nil pointer is always treated as
 // present so a pointer-to-custom field round-trips even when its value is the
 // zero value (e.g. an RGBString of "0 0 0").
+//
+// A value the game cannot read back as the same number is an error: NaN, and
+// integers outside the 32-bit range the game reads (signed kinds must fit an
+// int32, unsigned ones a uint32). An infinite float is written as ±1e999, which
+// the game reads back as the same infinity.
 func getScalar(f reflect.Value) (string, bool, error) {
 	if f.CanInterface() {
 		if m, ok := f.Interface().(ScalarMarshaler); ok {
@@ -135,32 +108,37 @@ func getScalar(f reflect.Value) (string, bool, error) {
 		return "0", true, nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		i := f.Int()
+		if i < math.MinInt32 || i > math.MaxInt32 {
+			return "", false, fmt.Errorf("tdf: integer %d is outside the 32-bit range the game reads", i)
+		}
 		return strconv.FormatInt(i, 10), i == 0, nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		u := f.Uint()
+		if u > math.MaxUint32 {
+			return "", false, fmt.Errorf("tdf: integer %d is outside the 32-bit range the game reads", u)
+		}
 		return strconv.FormatUint(u, 10), u == 0, nil
 	case reflect.Float32:
-		v := f.Float()
-		return strconv.FormatFloat(v, 'f', -1, 32), v == 0, nil
+		s, err := formatFloat(f.Float(), 32)
+		return s, f.Float() == 0, err
 	case reflect.Float64:
-		v := f.Float()
-		return strconv.FormatFloat(v, 'f', -1, 64), v == 0, nil
+		s, err := formatFloat(f.Float(), 64)
+		return s, f.Float() == 0, err
 	default:
 		return "", true, nil
 	}
 }
 
-func parseTDFBool(s string) bool {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "1", "true", "yes", "on":
-		return true
-	case "", "0", "false", "no", "off":
-		return false
+func formatFloat(v float64, bits int) (string, error) {
+	switch {
+	case math.IsNaN(v):
+		return "", fmt.Errorf("tdf: NaN has no TDF representation")
+	case math.IsInf(v, 1):
+		return "1e999", nil
+	case math.IsInf(v, -1):
+		return "-1e999", nil
 	}
-	if f, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
-		return f != 0
-	}
-	return false
+	return strconv.FormatFloat(v, 'f', -1, bits), nil
 }
 
 // setScalarList parses a single value into a slice. With an empty delim the
@@ -204,4 +182,34 @@ func encodeScalarList(f reflect.Value, delim string) (string, error) {
 		join = delim
 	}
 	return strings.Join(parts, join), nil
+}
+
+// decodesTo reports whether raw, decoded into a fresh value of f's type, gives
+// f's current value. It is how the encoder decides that a value is unchanged
+// since it was read and can be written back as the text it was read from.
+// parsed is false when raw does not decode at all.
+func decodesTo(f reflect.Value, raw string, list bool, delim string) (same, parsed bool) {
+	fresh := reflect.New(f.Type()).Elem()
+	var err error
+	if list {
+		err = setScalarList(fresh, raw, delim)
+	} else {
+		err = setScalar(fresh, raw)
+	}
+	if err != nil {
+		return false, false
+	}
+	return reflect.DeepEqual(fresh.Interface(), f.Interface()), true
+}
+
+// rendersAlike reports whether writing the value decoded from raw gives text
+// SemanticEqual accepts as the same as raw. When it does not ("13O" is written
+// back as "13", "2" in a bool as "0"), Unmarshal keeps raw in the ,remaining
+// catch-all so the text survives a round trip.
+func rendersAlike(f reflect.Value, raw string) bool {
+	s, _, err := getScalar(f)
+	if err != nil {
+		return false
+	}
+	return s == raw || numeralsEqual(s, raw)
 }

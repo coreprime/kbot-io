@@ -23,11 +23,12 @@ const (
 type fieldSpec struct {
 	index       []int
 	key         string // original-case tag key, used when emitting
-	ukey        string // upper-cased key, used when matching (TDF is case-insensitive)
+	ukey        string // key with ASCII letters upper-cased, used when matching
 	omitempty   bool
 	isName      bool   // captures/emits the enclosing section's header name
 	isRemaining bool   // map[string]string catch-all for unmatched scalar keys
 	isSections  bool   // []struct catch-all for unmatched child sections
+	isMeta      bool   // Meta recording the source's keys, order and text
 	countKey    string // for repeated sections: sibling scalar key holding the count
 	delimiter   string // for scalar slices: the value separator (default whitespace)
 }
@@ -40,7 +41,9 @@ type structSpec struct {
 	nameIndex      []int
 	remainingIndex []int
 	sectionsIndex  []int
-	countKeys      map[string]bool // upper-cased sibling count keys managed by repeats= fields
+	sectionsStem   string // tag key of the ,sections field: names unnamed elements
+	metaIndex      []int
+	countKeys      map[string]bool // folded sibling count keys managed by repeats= fields
 }
 
 var specCache sync.Map // reflect.Type -> structSpec
@@ -87,10 +90,14 @@ func collectFields(t reflect.Type, prefix []int, s *structSpec) {
 			continue
 		}
 		parts := splitTagOptions(tag)
+		// Leading spaces are dropped but a trailing one is kept: a repeated
+		// section field tagged "Schema " matches [Schema 0], [Schema 1], ...
+		// and names new sections the same way.
+		key := strings.TrimLeft(parts[0], " ")
 		fs := fieldSpec{
 			index: appendIndex(prefix, i),
-			key:   strings.TrimSpace(parts[0]),
-			ukey:  strings.ToUpper(strings.TrimSpace(parts[0])),
+			key:   key,
+			ukey:  foldKey(key),
 		}
 		for _, o := range parts[1:] {
 			o = strings.TrimSpace(o)
@@ -103,6 +110,8 @@ func collectFields(t reflect.Type, prefix []int, s *structSpec) {
 				fs.isRemaining = true
 			case o == "sections":
 				fs.isSections = true
+			case o == "meta":
+				fs.isMeta = true
 			case strings.HasPrefix(o, "repeats="):
 				fs.countKey = strings.TrimSpace(strings.TrimPrefix(o, "repeats="))
 			case strings.HasPrefix(o, "delimiter="):
@@ -117,12 +126,20 @@ func collectFields(t reflect.Type, prefix []int, s *structSpec) {
 		}
 		if fs.isSections {
 			s.sectionsIndex = fs.index
+			s.sectionsStem = fs.key
+		}
+		if fs.isMeta {
+			if f.Type != metaType && f.Type != reflect.PointerTo(metaType) {
+				continue // ,meta on anything but Meta or *Meta is ignored
+			}
+			s.metaIndex = fs.index
+			continue
 		}
 		if fs.countKey != "" {
 			if s.countKeys == nil {
 				s.countKeys = map[string]bool{}
 			}
-			s.countKeys[strings.ToUpper(fs.countKey)] = true
+			s.countKeys[foldKey(fs.countKey)] = true
 		}
 		s.fields = append(s.fields, fs)
 	}
@@ -167,9 +184,12 @@ func appendIndex(prefix []int, i int) []int {
 	return out
 }
 
-// fieldByName returns the first non-special tagged field matching name.
+var metaType = reflect.TypeOf(Meta{})
+
+// fieldByName returns the first non-special tagged field matching name,
+// ignoring ASCII case.
 func (s structSpec) fieldByName(name string) (fieldSpec, bool) {
-	u := strings.ToUpper(name)
+	u := foldKey(name)
 	for _, fs := range s.fields {
 		if fs.isName || fs.isRemaining || fs.isSections {
 			continue

@@ -34,6 +34,9 @@ type Side struct {
 
 	UnderAttackSound string `tdf:"underattack_sound,omitempty"`
 	UnderAttackDelay int    `tdf:"underattack_delay,omitempty"`
+
+	// Sections preserves any section nested in the side, in order.
+	Sections []common.Section `tdf:",sections"`
 }
 
 // Side satisfies the shared common.Side interface via its embedded base.

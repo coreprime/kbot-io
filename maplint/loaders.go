@@ -1,101 +1,50 @@
 package maplint
 
 import (
-	"strings"
+	"errors"
+	"strconv"
 
-	"github.com/coreprime/kbot-io/formats/tdf"
+	"github.com/coreprime/kbot-io/formats/gamedata/ta"
 )
 
-// ParseOTA reads a TA .ota file's text and extracts the fields the
-// lint cares about.  Schemas live in nested [Schema N] sections,
-// each with its own [specials] block carrying StartPos1..N entries.
-// Returns nil when the file has no [GlobalHeader] (probably not an
-// OTA at all).
+// ParseOTA reads a TA .ota file's text the way the game does and extracts the
+// fields the lint cares about. It returns nil when the file has no
+// [GlobalHeader] (probably not an OTA at all).
+//
+// Schemas holds the schemas the game can use: Schema 0, Schema 1, ... (names
+// compared ignoring case) up to the first missing number, in number order,
+// each Name being its number. Schema sections the game never reads are listed
+// in UnreachableSchemas. Each schema's StartPos holds every [specials] entry
+// whose specialwhat starts with StartPos, numbered as the game numbers them:
+// StartPos0 and entries with no number are kept (see ta.StartPosition).
 func ParseOTA(content string) (*OTAInfo, error) {
-	doc, err := tdf.ParseString(content)
+	m, err := ta.ReadMap([]byte(content))
+	if errors.Is(err, ta.ErrNoGlobalHeader) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	gh := doc.Section("GlobalHeader")
-	if gh == nil {
-		return nil, nil
-	}
+	h := &m.Header
 	out := &OTAInfo{
-		MissionName:        gh.String("missionname"),
-		MissionDescription: gh.String("missiondescription"),
-		Planet:             gh.String("planet"),
-		NumPlayers:         gh.String("numplayers"),
-		Size:               gh.String("size"),
-		SeaLevel:           gh.Int("sealevel"),
+		MissionName:        h.MissionName,
+		MissionDescription: h.MissionDescription,
+		Planet:             h.Planet,
+		NumPlayers:         h.NumPlayersText(),
+		Size:               h.Size,
+		SeaLevel:           h.SeaLevel,
+		UnreachableSchemas: h.UnreachableSchemas(),
 	}
-	for _, sec := range gh.Sections() {
-		if !strings.HasPrefix(strings.ToLower(sec.Name()), "schema") {
-			continue
-		}
+	for n, s := range h.GameSchemas() {
 		schema := SchemaInfo{
-			Name:         strings.TrimPrefix(sec.Name(), "Schema "),
-			Type:         sec.String("type"),
-			SurfaceMetal: sec.Int("surfacemetal"),
+			Name:         strconv.Itoa(n),
+			Type:         s.Type,
+			SurfaceMetal: s.SurfaceMetal,
 		}
-		if schema.Name == "" {
-			schema.Name = sec.Name()
-		}
-		for _, child := range sec.Sections() {
-			if !strings.EqualFold(child.Name(), "specials") {
-				continue
-			}
-			for _, sp := range child.Sections() {
-				what := sp.String("specialwhat")
-				if !strings.HasPrefix(strings.ToLower(what), "startpos") {
-					continue
-				}
-				num := 0
-				if n, err := atoiTail(what, len("StartPos")); err == nil {
-					num = n
-				}
-				if num <= 0 {
-					continue
-				}
-				schema.StartPos = append(schema.StartPos, StartPos{
-					Number: num,
-					X:      sp.Int("xpos"),
-					Z:      sp.Int("zpos"),
-				})
-			}
+		for _, p := range s.StartPositions() {
+			schema.StartPos = append(schema.StartPos, StartPos{Number: p.Number, Slot: p.Slot, X: p.X, Z: p.Z})
 		}
 		out.Schemas = append(out.Schemas, schema)
 	}
 	return out, nil
 }
-
-// atoiTail parses the integer suffix starting at byte offset off.
-// Used for "StartPosN" → N.  Returns (n, nil) on success and (0, err)
-// when the suffix isn't a non-negative integer.
-func atoiTail(s string, off int) (int, error) {
-	if off >= len(s) {
-		return 0, errNoDigits
-	}
-	tail := s[off:]
-	n := 0
-	any := false
-	for _, r := range tail {
-		if r < '0' || r > '9' {
-			break
-		}
-		n = n*10 + int(r-'0')
-		any = true
-	}
-	if !any {
-		return 0, errNoDigits
-	}
-	return n, nil
-}
-
-// errNoDigits is a sentinel for atoiTail — keeps the hot path
-// allocation-free.
-var errNoDigits = newSimpleErr("no digit suffix")
-
-type simpleErr struct{ msg string }
-
-func (e *simpleErr) Error() string { return e.msg }
-func newSimpleErr(s string) error  { return &simpleErr{msg: s} }

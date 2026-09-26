@@ -9,14 +9,18 @@ import (
 
 	"github.com/coreprime/kbot-io/formats/gamedata/common"
 	"github.com/coreprime/kbot-io/formats/tdf"
+	"github.com/coreprime/kbot-io/testutil"
 )
 
-// takRoot returns the unpacked TA:Kingdoms game directory, or "" to skip.
-func takRoot() string { return os.Getenv("TAK_UNPACKED_PATH") }
+// takRoot returns the unpacked TA:Kingdoms game directory. It fails the test
+// when TAK_UNPACKED_PATH is unset, unless ALLOW_SKIP_ASSETS=true, which skips
+// it.
+func takRoot(t *testing.T) string { return testutil.TAKUnpackedPath(t) }
 
 // roundTripDir decodes every file under root/sub with one of exts into a fresh
-// value produced by newv, re-marshals it, and asserts the result is
-// semantically equal to the original. Files containing NUL bytes (compiled
+// value produced by newv, re-marshals it, and asserts that it reads back
+// exactly as the original (tdf.SemanticEqual: every key the source had is
+// still present, explicit zeros included, and every value reads the same). Files containing NUL bytes (compiled
 // binary blobs masquerading as text) are skipped.
 func roundTripDir(t *testing.T, root, sub string, exts map[string]bool, newv func() any) {
 	t.Helper()
@@ -99,10 +103,7 @@ func rel(root, path string) string {
 }
 
 func TestRoundTripUnits(t *testing.T) {
-	root := takRoot()
-	if root == "" {
-		t.Skip("TAK_UNPACKED_PATH not set")
-	}
+	root := takRoot(t)
 	roundTripDir(t, root, "units", map[string]bool{".fbi": true}, func() any { return &Unit{} })
 	// unitscb holds corpse/effect units; their [WEAPONn] sections carry the
 	// tracer colour fields (innercolor/middlecolor/outercolor).
@@ -110,18 +111,12 @@ func TestRoundTripUnits(t *testing.T) {
 }
 
 func TestRoundTripFeatures(t *testing.T) {
-	root := takRoot()
-	if root == "" {
-		t.Skip("TAK_UNPACKED_PATH not set")
-	}
+	root := takRoot(t)
 	roundTripDir(t, root, "features", map[string]bool{".tdf": true}, func() any { return &[]Feature{} })
 }
 
 func TestRoundTripMaps(t *testing.T) {
-	root := takRoot()
-	if root == "" {
-		t.Skip("TAK_UNPACKED_PATH not set")
-	}
+	root := takRoot(t)
 	// .ota files live under both maps/ and missions/; scan the whole tree.
 	roundTripDir(t, root, ".", map[string]bool{".ota": true}, func() any { return &Map{} })
 }
@@ -149,26 +144,17 @@ func roundTripFile(t *testing.T, root, name string, newv func() any) {
 }
 
 func TestRoundTripMoveInfo(t *testing.T) {
-	root := takRoot()
-	if root == "" {
-		t.Skip("TAK_UNPACKED_PATH not set")
-	}
+	root := takRoot(t)
 	roundTripFile(t, root, filepath.Join("gamedata", "moveinfo.tdf"), func() any { return &[]MovementClass{} })
 }
 
 func TestRoundTripSideData(t *testing.T) {
-	root := takRoot()
-	if root == "" {
-		t.Skip("TAK_UNPACKED_PATH not set")
-	}
+	root := takRoot(t)
 	roundTripFile(t, root, filepath.Join("gamedata", "sidedata.tdf"), func() any { return &[]Side{} })
 }
 
 func TestRoundTripEffects(t *testing.T) {
-	root := takRoot()
-	if root == "" {
-		t.Skip("TAK_UNPACKED_PATH not set")
-	}
+	root := takRoot(t)
 	roundTripFile(t, root, filepath.Join("gamedata", "effects", "effects.tdf"), func() any { return &[]Effect{} })
 	// explosions/ and damageflames/ use numbered [0]..[n] sub-blocks rather than
 	// the palette/emitters layout, so they round-trip through the generic type.
@@ -182,10 +168,7 @@ func TestRoundTripEffects(t *testing.T) {
 // translations, campaign and build-menu manifests). They round-trip through the
 // generic common.Section model.
 func TestRoundTripGeneric(t *testing.T) {
-	root := takRoot()
-	if root == "" {
-		t.Skip("TAK_UNPACKED_PATH not set")
-	}
+	root := takRoot(t)
 	sec := func() any { return &[]common.Section{} }
 	for _, name := range []string{
 		filepath.Join("gamedata", "ainames.tdf"),
@@ -209,7 +192,6 @@ func TestRoundTripGeneric(t *testing.T) {
 	} {
 		roundTripDir(t, root, sub, tdfOnly, sec)
 	}
-	// anims/*.tsf are nested animation-sequence definitions ([FrameN]/[LayerN])
-	// in TDF grammar.
-	roundTripDir(t, root, "anims", map[string]bool{".tsf": true}, sec)
+	// anims/*.tsf files are not read here: they are TSF text, which has its
+	// own grammar and its own round-trip tests in formats/tsf.
 }
