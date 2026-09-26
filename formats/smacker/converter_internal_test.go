@@ -96,3 +96,43 @@ func TestFFmpegPathsNotOptions(t *testing.T) {
 		}
 	}
 }
+
+func TestNoSmackerWriterMessages(t *testing.T) {
+	for _, out := range []string{
+		"[out#0 @ 0x1] Unable to choose an output format for 'out.smk'; use a standard extension for the filename or specify the format manually.",
+		"Unknown encoder 'smackvid'",
+		"[NULL @ 0x1] Unable to find a suitable output format for 'out.smk'",
+	} {
+		if !noSmackerWriter(out) {
+			t.Errorf("noSmackerWriter(%q) = false", out)
+		}
+	}
+	if noSmackerWriter("in.mp4: No such file or directory") {
+		t.Error("noSmackerWriter matched an unrelated error")
+	}
+}
+
+func TestListingHas(t *testing.T) {
+	encoders := `Encoders:
+ V..... = Video
+ ------
+ V....D libx264              libx264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (codec h264)
+ A....D aac                  AAC (Advanced Audio Coding)
+`
+	muxers := `File formats:
+ D. = Demuxing supported
+ .E = Muxing supported
+ ---
+  E mp4             MP4 (MPEG-4 Part 14)
+  E matroska,webm   Matroska
+`
+	if listingHas(encoders, "smackvid") || listingHas(muxers, "smk") {
+		t.Error("found a Smacker writer in listings without one")
+	}
+	if !listingHas(encoders, "libx264") || !listingHas(muxers, "webm") || !listingHas(muxers, "mp4") {
+		t.Error("listingHas missed a listed name")
+	}
+	if !listingHas(encoders+" V....D smackvid  Smacker video\n", "smackvid") {
+		t.Error("listingHas missed smackvid")
+	}
+}

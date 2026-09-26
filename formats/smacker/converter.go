@@ -1,6 +1,7 @@
 package smacker
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -134,27 +135,86 @@ func ConvertToMP4WithOptions(smkPath, mp4Path string, opts MP4Options) error {
 	return nil
 }
 
-// ConvertFromMP4 converts an MP4 file to Smacker format using FFmpeg
+// ErrNoSmackerWriter reports that MP4 cannot be converted to Smacker:
+// FFmpeg decodes Smacker but has no Smacker encoder or muxer, and this
+// package has no Smacker writer. SMK2 movies for TA are made with RAD's
+// Smacker tools.
+var ErrNoSmackerWriter = errors.New("smacker: FFmpeg has no Smacker encoder or muxer, so MP4 cannot be converted to Smacker; " +
+	"make SMK2 movies with RAD's Smacker tools")
+
+// ConvertFromMP4 would convert an MP4 file to Smacker with FFmpeg's
+// smackvid/smackaud encoders and smk muxer. Stock FFmpeg has none of them,
+// so unless the installed FFmpeg lists both a smackvid encoder and an smk
+// muxer, ConvertFromMP4 returns ErrNoSmackerWriter at once without
+// converting anything. If FFmpeg is run and reports that it cannot encode
+// or write Smacker, the result is also ErrNoSmackerWriter.
 func ConvertFromMP4(mp4Path, smkPath string) error {
 	if !FFmpegAvailable() {
 		return fmt.Errorf("ffmpeg not found in PATH\nPlease install: brew install ffmpeg (macOS) or apt-get install ffmpeg (Linux)")
 	}
+	if ok, err := ffmpegCanWriteSmacker(); err == nil && !ok {
+		return ErrNoSmackerWriter
+	}
 
-	// Note: FFmpeg can decode Smacker but encoding is limited
-	// This will use FFmpeg's built-in Smacker encoder if available
 	cmd := exec.Command("ffmpeg", fromMP4Args(mp4Path, smkPath)...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		// If smacker encoding fails, provide helpful error
-		if strings.Contains(string(output), "Unknown encoder") {
-			return fmt.Errorf("smacker encoding not supported by your FFmpeg build; " +
-				"alternative: use RAD Video Tools or libsmacker; " +
-				"this Go implementation provides decoding only")
+		if noSmackerWriter(string(output)) {
+			return ErrNoSmackerWriter
 		}
 		return fmt.Errorf("ffmpeg conversion failed: %w\nOutput: %s", err, string(output))
 	}
 
 	return nil
+}
+
+// ffmpegCanWriteSmacker asks FFmpeg whether it has a smackvid encoder and
+// an smk muxer.
+func ffmpegCanWriteSmacker() (bool, error) {
+	encoders, err := exec.Command("ffmpeg", "-hide_banner", "-nostdin", "-encoders").Output()
+	if err != nil {
+		return false, err
+	}
+	muxers, err := exec.Command("ffmpeg", "-hide_banner", "-nostdin", "-muxers").Output()
+	if err != nil {
+		return false, err
+	}
+	return listingHas(string(encoders), "smackvid") && listingHas(string(muxers), "smk"), nil
+}
+
+// listingHas reports whether an "ffmpeg -encoders" or "ffmpeg -muxers"
+// listing names name. Each entry line is a flags column followed by the
+// name, or by comma-separated names.
+func listingHas(listing, name string) bool {
+	for _, line := range strings.Split(listing, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		for _, n := range strings.Split(f[1], ",") {
+			if n == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// noSmackerWriter reports whether FFmpeg's output says it has no Smacker
+// encoder ("Unknown encoder") or no muxer for the .smk output ("Unable to
+// choose an output format", or "Unable to find a suitable output format"
+// from older versions).
+func noSmackerWriter(output string) bool {
+	for _, msg := range []string{
+		"Unknown encoder",
+		"Unable to choose an output format",
+		"Unable to find a suitable output format",
+	} {
+		if strings.Contains(output, msg) {
+			return true
+		}
+	}
+	return false
 }
 
 // fromMP4Args builds the FFmpeg arguments for ConvertFromMP4.

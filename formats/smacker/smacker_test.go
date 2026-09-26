@@ -1,6 +1,7 @@
 package smacker_test
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -303,4 +304,31 @@ func grayRows(t *testing.T, path string, n, w, h int, vf string) []float64 {
 		rows[y] = float64(sum) / float64(w)
 	}
 	return rows
+}
+
+// TestConvertFromMP4FailsEarly checks that, with an FFmpeg that cannot
+// write Smacker, ConvertFromMP4 returns ErrNoSmackerWriter before touching
+// its input (which does not exist here).
+func TestConvertFromMP4FailsEarly(t *testing.T) {
+	if !smacker.FFmpegAvailable() {
+		t.Skip("ffmpeg not on PATH")
+	}
+	out, err := exec.Command("ffmpeg", "-hide_banner", "-encoders").Output()
+	if err != nil {
+		t.Skipf("ffmpeg -encoders: %v", err)
+	}
+	if strings.Contains(string(out), " smackvid ") {
+		t.Skip("this FFmpeg has a Smacker encoder")
+	}
+	dir := t.TempDir()
+	err = smacker.ConvertFromMP4(filepath.Join(dir, "missing.mp4"), filepath.Join(dir, "out.smk"))
+	if !errors.Is(err, smacker.ErrNoSmackerWriter) {
+		t.Fatalf("ConvertFromMP4 = %v, want ErrNoSmackerWriter", err)
+	}
+	if !strings.Contains(err.Error(), "no Smacker encoder or muxer") {
+		t.Errorf("message %q does not say FFmpeg cannot write Smacker", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "out.smk")); statErr == nil {
+		t.Error("an output file was created")
+	}
 }
