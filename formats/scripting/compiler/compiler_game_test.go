@@ -125,6 +125,17 @@ func TestCompileAngleAndDistanceLiterals(t *testing.T) {
 	)
 }
 
+func TestCompileAngleLiteralExpressions(t *testing.T) {
+	// Each <n> is its own literal; the brackets are not stripped as a
+	// wrapper around the whole operand.
+	code, _ := compileBody(t, "piece base;", "\tturn base to x-axis <5> + <3> speed <90>;")
+	equalWords(t, code, push, 16384, push, 910, push, 546, scripting.OP_ADD, scripting.OP_TURN, 0, 0)
+	// Brackets around a whole expression, as earlier decompilers wrote,
+	// are still dropped.
+	code, _ = compileBody(t, "piece base;", "\tvar x;\n\tturn base to x-axis <x> now;")
+	equalWords(t, code, alloc, local, 0, scripting.OP_TURN_NOW, 0, 0)
+}
+
 func TestCompileRawAngleUnits(t *testing.T) {
 	// `.angle_units raw`, and sources written by earlier decompilers, keep
 	// <n> as the value itself.

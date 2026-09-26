@@ -66,11 +66,13 @@ func (c *Compiler) compileExpression(expr string) error {
 
 // compileOperand compiles an operand of a movement statement. Earlier
 // decompilers wrapped every operand in angle brackets, including
-// expressions such as <local_0>; brackets around anything other than a
-// numeric literal are dropped and the contents compiled as an expression.
+// expressions such as <local_0>. When the operand starts with `<`, ends
+// with `>` and the opening bracket does not begin a <number> literal, the
+// brackets wrap the whole operand and are dropped; an operand such as
+// <5> + <3>, made of literals, is compiled as written.
 func (c *Compiler) compileOperand(text string) error {
 	text = strings.TrimSpace(text)
-	if strings.HasPrefix(text, "<") && strings.HasSuffix(text, ">") && !numericLiteralRE.MatchString(text[1:len(text)-1]) {
+	if strings.HasPrefix(text, "<") && strings.HasSuffix(text, ">") && !angleLiteralRE.MatchString(text) {
 		return c.compileExpression(text[1 : len(text)-1])
 	}
 	return c.compileExpression(text)
@@ -96,11 +98,10 @@ type token struct {
 }
 
 var (
-	numericLiteralRE = regexp.MustCompile(`^\s*[-+]?\s*(\d+\.?\d*|\.\d+)\s*$`)
-	angleLiteralRE   = regexp.MustCompile(`^<\s*([-+]?\s*(?:\d+\.?\d*|\.\d+))\s*>`)
-	linearLiteralRE  = regexp.MustCompile(`^\[\s*([-+]?\s*(?:\d+\.?\d*|\.\d+))\s*\]`)
-	numberRE         = regexp.MustCompile(`^(0[xX][0-9a-fA-F]+|\d+)`)
-	identRE          = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*`)
+	angleLiteralRE  = regexp.MustCompile(`^<\s*([-+]?\s*(?:\d+\.?\d*|\.\d+))\s*>`)
+	linearLiteralRE = regexp.MustCompile(`^\[\s*([-+]?\s*(?:\d+\.?\d*|\.\d+))\s*\]`)
+	numberRE        = regexp.MustCompile(`^(0[xX][0-9a-fA-F]+|\d+)`)
+	identRE         = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*`)
 )
 
 // hyphenatedCalls are keywords whose name contains a hyphen.
