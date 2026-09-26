@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 )
 
 // maxFramePixels caps the pixel count of a single decoded frame. Width and
@@ -314,10 +315,8 @@ func (d *decoder) clone(f *Frame) (*Frame, error) {
 		return nil, err
 	}
 	c := *f
-	c.Pixels = append([]byte(nil), f.Pixels...)
-	if f.Opaque != nil {
-		c.Opaque = append([]bool(nil), f.Opaque...)
-	}
+	c.Pixels = slices.Clone(f.Pixels)
+	c.Opaque = slices.Clone(f.Opaque)
 	if f.Layers != nil {
 		c.Layers = make([]*Frame, len(f.Layers))
 		for i, l := range f.Layers {
