@@ -112,6 +112,9 @@ func TestRetailScriptsHaveBalancedStacks(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: %v", e.Name(), err)
 			}
+			if len(cob.Warnings) != 0 {
+				t.Errorf("%s: warnings %v", e.Name(), cob.Warnings)
+			}
 			files++
 			for i := 0; i < int(cob.NumScripts); i++ {
 				insts, err := cob.Disassemble(i)

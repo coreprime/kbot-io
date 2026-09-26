@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"strings"
 
 	"github.com/coreprime/kbot-io/filesystem"
 )
@@ -21,9 +23,9 @@ type COB struct {
 	VersionSignature              uint32 // [0] Version (4 for TA, 6 for TA: Kingdoms)
 	NumScripts                    uint32 // [1] Number of scripts
 	NumPieces                     uint32 // [2] Number of pieces
-	LengthOfScripts               uint32 // [3] Total code size in DWORDs
+	LengthOfScripts               uint32 // [3] Total code size in DWORDs (recomputed from Code on write)
 	NumberOfStaticVars            uint32 // [4] Number of static variables
-	UKZero                        uint32 // [5] Always 0 in retail bytecode; purpose unknown
+	UKZero                        uint32 // [5] Always 0 in retail bytecode; purpose unknown; written back unchanged
 	OffsetToScriptCodeIndexArray  uint32 // [6] Offset to script index array
 	OffsetToScriptNameOffsetArray uint32 // [7] Offset to script name array (ABSOLUTE offsets)
 	OffsetToPieceNameOffsetArray  uint32 // [8] Offset to piece name array (ABSOLUTE offsets)
@@ -45,11 +47,39 @@ type COB struct {
 	// are reconstructed from this slice on write — for TA's v4 .cob files
 	// the slice is always nil and the wrapping pieces are omitted.
 	SoundNames []string
+
+	// Warnings lists the malformed parts of the file that LoadFromReader
+	// tolerated: name offsets outside the name pool or past the end of the
+	// file, names without a terminating NUL, and header fields that
+	// disagree with the section layout. A rewrite does not repair them.
+	Warnings []LoadWarning
+}
+
+// LoadWarning describes one malformed but tolerated part of a COB file.
+type LoadWarning struct {
+	Section string // "script names", "piece names", "sound names" or "header"
+	Index   int    // entry index within the section, or -1
+	Offset  uint32 // file offset concerned
+	Message string
+}
+
+func (w LoadWarning) String() string {
+	if w.Index >= 0 {
+		return fmt.Sprintf("%s[%d] at 0x%X: %s", w.Section, w.Index, w.Offset, w.Message)
+	}
+	return fmt.Sprintf("%s at 0x%X: %s", w.Section, w.Offset, w.Message)
 }
 
 // ErrTruncatedInstruction reports an instruction whose opcode or operand
 // words run past the end of the code section.
 var ErrTruncatedInstruction = errors.New("truncated instruction")
+
+const (
+	cobHeaderSize         = 44
+	cobKingdomsSubHeader  = 8
+	cobKingdomsVersion    = 6
+	cobMaxWrittenFileSize = math.MaxUint32
+)
 
 // LoadFromFile reads a COB file from the local filesystem
 func LoadFromFile(path string) (*COB, error) {
@@ -72,101 +102,131 @@ func LoadFromFilesystem(fs filesystem.FileSystem, path string) (*COB, error) {
 	return LoadFromReader(bytes.NewReader(data))
 }
 
-// LoadFromReader reads a COB from an io.Reader (streaming)
-// Instruction represents a single disassembled COB instruction.
+// LoadFromReader reads a COB from an io.Reader.
+//
+// The game turns the header offsets into pointers without checking the
+// layout, so the reader accepts any arrangement of sections that lies
+// inside the file. The code section runs from its offset to the next table
+// that follows it (or the end of the file); a file without code is
+// accepted. Every table is bounds-checked against the file size before
+// anything is allocated, so a count or offset that cannot fit returns an
+// error. Name offsets are resolved like the game resolves them, as a
+// NUL-terminated string at that file offset (offset 0 names the header
+// bytes); offsets outside the name pool, past the end of the file or
+// without a terminating NUL are recorded in COB.Warnings.
 func LoadFromReader(r io.Reader) (*COB, error) {
 	cob := &COB{}
 
-	// Read entire file first (need random access)
 	allData, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
+	size := uint64(len(allData))
 
-	// Read header (11 uint32s = 44 bytes)
-	if len(allData) < 44 {
+	if size < cobHeaderSize {
 		return nil, fmt.Errorf("file too small for header")
 	}
 
-	cob.VersionSignature = binary.LittleEndian.Uint32(allData[0:4])
-	cob.NumScripts = binary.LittleEndian.Uint32(allData[4:8])
-	cob.NumPieces = binary.LittleEndian.Uint32(allData[8:12])
-	cob.LengthOfScripts = binary.LittleEndian.Uint32(allData[12:16])
-	cob.NumberOfStaticVars = binary.LittleEndian.Uint32(allData[16:20])
-	cob.UKZero = binary.LittleEndian.Uint32(allData[20:24])
-	cob.OffsetToScriptCodeIndexArray = binary.LittleEndian.Uint32(allData[24:28])
-	cob.OffsetToScriptNameOffsetArray = binary.LittleEndian.Uint32(allData[28:32])
-	cob.OffsetToPieceNameOffsetArray = binary.LittleEndian.Uint32(allData[32:36])
-	cob.OffsetToScriptCode = binary.LittleEndian.Uint32(allData[36:40])
-	cob.OffsetToNameArray = binary.LittleEndian.Uint32(allData[40:44])
+	u32 := func(off uint64) uint32 { return binary.LittleEndian.Uint32(allData[off : off+4]) }
+	cob.VersionSignature = u32(0)
+	cob.NumScripts = u32(4)
+	cob.NumPieces = u32(8)
+	cob.LengthOfScripts = u32(12)
+	cob.NumberOfStaticVars = u32(16)
+	cob.UKZero = u32(20)
+	cob.OffsetToScriptCodeIndexArray = u32(24)
+	cob.OffsetToScriptNameOffsetArray = u32(28)
+	cob.OffsetToPieceNameOffsetArray = u32(32)
+	cob.OffsetToScriptCode = u32(36)
+	cob.OffsetToNameArray = u32(40)
 
 	// TA: Kingdoms .cob files (VersionSignature == 6) insert an 8-byte
 	// sub-header at file offset 0x2C: two little-endian uint32s holding
 	// the absolute offset of the sound-name offset table and the number
-	// of sound names. Both values are redundant with the canonical
-	// layout we reconstruct on write (the offset == start of the
-	// trailing offset table, and the count == len(SoundNames)) so we
-	// only consult the count here. For TA v4 .cob files this sub-header
-	// is absent.
-	var soundNameCount uint32
-	if cob.OffsetToScriptCode > 44 && cob.VersionSignature == 6 {
-		end := cob.OffsetToScriptCode
-		if end > uint32(len(allData)) {
-			end = uint32(len(allData))
+	// of sound names. The table itself is read from just past the
+	// piece-name offset array, which is where every retail file has it.
+	var soundNameCount, soundTableHint uint32
+	if cob.VersionSignature == cobKingdomsVersion && cob.OffsetToScriptCode >= cobHeaderSize+cobKingdomsSubHeader &&
+		size >= cobHeaderSize+cobKingdomsSubHeader {
+		soundTableHint = u32(44)
+		soundNameCount = u32(48)
+	}
+
+	readTable := func(section string, off uint32, count uint32) ([]uint32, error) {
+		end := uint64(off) + uint64(count)*4
+		if end > size {
+			return nil, fmt.Errorf("%s table (%d entries at 0x%X) runs past the end of the %d-byte file",
+				section, count, off, size)
 		}
-		if end >= 52 {
-			soundNameCount = binary.LittleEndian.Uint32(allData[48:52])
+		out := make([]uint32, count)
+		for i := range out {
+			out[i] = u32(uint64(off) + uint64(i)*4)
+		}
+		return out, nil
+	}
+
+	// Entry and name tables first: they bound the counts before anything
+	// else is allocated from them.
+	if cob.ScriptCodeIndices, err = readTable("script entry", cob.OffsetToScriptCodeIndexArray, cob.NumScripts); err != nil {
+		return nil, err
+	}
+	scriptNameOffsets, err := readTable("script name", cob.OffsetToScriptNameOffsetArray, cob.NumScripts)
+	if err != nil {
+		return nil, err
+	}
+	pieceNameOffsets, err := readTable("piece name", cob.OffsetToPieceNameOffsetArray, cob.NumPieces)
+	if err != nil {
+		return nil, err
+	}
+	var soundNameOffsets []uint32
+	soundTable := uint64(cob.OffsetToPieceNameOffsetArray) + uint64(cob.NumPieces)*4
+	if soundNameCount > 0 {
+		if soundTable > math.MaxUint32 {
+			return nil, fmt.Errorf("sound name table offset 0x%X is out of range", soundTable)
+		}
+		if soundNameOffsets, err = readTable("sound name", uint32(soundTable), soundNameCount); err != nil {
+			return nil, err
+		}
+		if uint64(soundTableHint) != soundTable {
+			cob.warn("header", -1, soundTableHint, fmt.Sprintf(
+				"sound name table offset 0x%X differs from the table's position 0x%X after the piece names",
+				soundTableHint, soundTable))
 		}
 	}
 
-	// Read code section (starts at OffsetToScriptCode)
-	codeStart := cob.OffsetToScriptCode
-	// Code ends at the first offset table
-	codeEnd := cob.OffsetToScriptCodeIndexArray
-	if codeEnd <= codeStart {
-		return nil, fmt.Errorf("invalid code bounds")
+	// Code section: from its offset to the next table after it.
+	codeStart := uint64(cob.OffsetToScriptCode)
+	if codeStart > size {
+		return nil, fmt.Errorf("code offset 0x%X is past the end of the %d-byte file", codeStart, size)
 	}
+	codeEnd := size
+	bound := func(off uint32, present bool) {
+		if present && uint64(off) >= codeStart && uint64(off) < codeEnd {
+			codeEnd = uint64(off)
+		}
+	}
+	bound(cob.OffsetToScriptCodeIndexArray, cob.NumScripts > 0)
+	bound(cob.OffsetToScriptNameOffsetArray, cob.NumScripts > 0)
+	bound(cob.OffsetToPieceNameOffsetArray, cob.NumPieces > 0)
+	if soundNameCount > 0 {
+		bound(uint32(soundTable), true)
+	}
+	bound(cob.OffsetToNameArray, cob.NumScripts > 0 || cob.NumPieces > 0 || soundNameCount > 0)
 	cob.Code = allData[codeStart:codeEnd]
-
-	// Read script code indices (NOT offsets!)
-	// Per doc: "Offset to a script is calculated by: OffsetToScriptCode + (ScriptCodeIndexArray[ScriptNumber] * 4)"
-	cob.ScriptCodeIndices = make([]uint32, cob.NumScripts)
-	idxPos := cob.OffsetToScriptCodeIndexArray
-	for i := uint32(0); i < cob.NumScripts; i++ {
-		if idxPos+4 > uint32(len(allData)) {
-			return nil, fmt.Errorf("script index %d out of bounds", i)
-		}
-		cob.ScriptCodeIndices[i] = binary.LittleEndian.Uint32(allData[idxPos : idxPos+4])
-		idxPos += 4
+	if codeLen := codeEnd - codeStart; uint64(cob.LengthOfScripts)*4 != codeLen {
+		cob.warn("header", -1, 12, fmt.Sprintf(
+			"code length %d words disagrees with the %d-byte code section", cob.LengthOfScripts, codeLen))
 	}
 
-	// Read script names
-	cob.ScriptNames = make([]string, cob.NumScripts)
-	namePos := cob.OffsetToScriptNameOffsetArray
-	for i := uint32(0); i < cob.NumScripts; i++ {
-		if namePos+4 > uint32(len(allData)) {
-			break
+	readNames := func(section string, offsets []uint32) []string {
+		names := make([]string, len(offsets))
+		for i, off := range offsets {
+			names[i] = cob.readName(allData, section, i, off)
 		}
-		offset := binary.LittleEndian.Uint32(allData[namePos : namePos+4])
-		if offset > 0 && offset < uint32(len(allData)) {
-			cob.ScriptNames[i] = readCString(allData[offset:])
-		}
-		namePos += 4
+		return names
 	}
-
-	// Read piece names
-	cob.PieceNames = make([]string, cob.NumPieces)
-	piecePos := cob.OffsetToPieceNameOffsetArray
-	for i := uint32(0); i < cob.NumPieces; i++ {
-		if piecePos+4 > uint32(len(allData)) {
-			break
-		}
-		offset := binary.LittleEndian.Uint32(allData[piecePos : piecePos+4])
-		if offset > 0 && offset < uint32(len(allData)) {
-			cob.PieceNames[i] = readCString(allData[offset:])
-		}
-		piecePos += 4
-	}
+	cob.ScriptNames = readNames("script names", scriptNameOffsets)
+	cob.PieceNames = readNames("piece names", pieceNameOffsets)
 
 	// TA: Kingdoms v6 .cob files append an extra offset table immediately
 	// after the piece-name offset array (entry count from the sub-header
@@ -176,31 +236,32 @@ func LoadFromReader(r io.Reader) (*COB, error) {
 	// scripts and engine-command strings ("SetMission o 1, s") for the
 	// mission COBs — picked up by the MISSION_COMMAND opcode.
 	if soundNameCount > 0 {
-		cob.SoundNames = make([]string, soundNameCount)
-		cmdPos := cob.OffsetToPieceNameOffsetArray + cob.NumPieces*4
-		for i := uint32(0); i < soundNameCount; i++ {
-			if cmdPos+4 > uint32(len(allData)) {
-				break
-			}
-			offset := binary.LittleEndian.Uint32(allData[cmdPos : cmdPos+4])
-			if offset > 0 && offset < uint32(len(allData)) {
-				cob.SoundNames[i] = readCString(allData[offset:])
-			}
-			cmdPos += 4
-		}
+		cob.SoundNames = readNames("sound names", soundNameOffsets)
 	}
 
 	return cob, nil
 }
 
-// readCString reads a null-terminated C string
-func readCString(data []byte) string {
-	for i, b := range data {
-		if b == 0 {
-			return string(data[:i])
-		}
+// readName resolves one name offset the way the game does and records a
+// warning when the offset is malformed.
+func (c *COB) readName(data []byte, section string, index int, off uint32) string {
+	if uint64(off) >= uint64(len(data)) {
+		c.warn(section, index, off, "name offset is past the end of the file")
+		return ""
 	}
-	return string(data)
+	if off < c.OffsetToNameArray {
+		c.warn(section, index, off, fmt.Sprintf("name offset is before the name pool at 0x%X", c.OffsetToNameArray))
+	}
+	rest := data[off:]
+	if n := bytes.IndexByte(rest, 0); n >= 0 {
+		return string(rest[:n])
+	}
+	c.warn(section, index, off, "name is not NUL-terminated before the end of the file")
+	return string(rest)
+}
+
+func (c *COB) warn(section string, index int, off uint32, msg string) {
+	c.Warnings = append(c.Warnings, LoadWarning{Section: section, Index: index, Offset: off, Message: msg})
 }
 
 // Instruction represents a single COB bytecode instruction (nTA format)
@@ -323,6 +384,35 @@ func (c *COB) SaveToFile(filename string) error {
 	return c.WriteToWriter(f)
 }
 
+// validateForWrite checks that the structured fields describe one
+// consistent file.
+func (c *COB) validateForWrite() error {
+	if uint64(c.NumScripts) != uint64(len(c.ScriptCodeIndices)) {
+		return fmt.Errorf("NumScripts is %d but there are %d script entries", c.NumScripts, len(c.ScriptCodeIndices))
+	}
+	if len(c.ScriptNames) != len(c.ScriptCodeIndices) {
+		return fmt.Errorf("%d script names for %d script entries", len(c.ScriptNames), len(c.ScriptCodeIndices))
+	}
+	if uint64(c.NumPieces) != uint64(len(c.PieceNames)) {
+		return fmt.Errorf("NumPieces is %d but there are %d piece names", c.NumPieces, len(c.PieceNames))
+	}
+	if len(c.SoundNames) > 0 && c.VersionSignature != cobKingdomsVersion {
+		return fmt.Errorf("sound names need VersionSignature %d (TA: Kingdoms), not %d",
+			cobKingdomsVersion, c.VersionSignature)
+	}
+	for _, group := range []struct {
+		what  string
+		names []string
+	}{{"script", c.ScriptNames}, {"piece", c.PieceNames}, {"sound", c.SoundNames}} {
+		for i, name := range group.names {
+			if strings.IndexByte(name, 0) >= 0 {
+				return fmt.Errorf("%s name %d contains a NUL byte", group.what, i)
+			}
+		}
+	}
+	return nil
+}
+
 // WriteToWriter writes the COB to a writer.
 //
 // The on-disk layout is fully reconstructed from the structured fields —
@@ -338,44 +428,58 @@ func (c *COB) SaveToFile(filename string) error {
 // is laid out script names → piece names → sound names, in that order,
 // with all offsets and the v6 sub-header reconstructed from the
 // structured fields below.
+//
+// The code is padded with zero bytes to a whole number of words and the
+// header's code length is taken from it (LengthOfScripts is not consulted).
+// NumScripts must equal the number of script entries and names, NumPieces
+// the number of piece names; sound names need VersionSignature 6, and no
+// name may contain a NUL byte. Header field 5 (UKZero) is written as is.
 func (c *COB) WriteToWriter(w io.Writer) error {
-	headerSize := 44 // canonical TA 11-DWORD header
-	subHeaderSize := 0
-	if c.VersionSignature == 6 {
-		subHeaderSize = 8 // [soundNameOffArr, len(SoundNames)]
+	if err := c.validateForWrite(); err != nil {
+		return fmt.Errorf("cannot write COB: %w", err)
+	}
+
+	code := c.Code
+	if pad := len(code) % 4; pad != 0 {
+		code = append(append([]byte(nil), code...), make([]byte, 4-pad)...)
+	}
+
+	headerSize := uint64(cobHeaderSize) // canonical TA 11-DWORD header
+	subHeaderSize := uint64(0)
+	if c.VersionSignature == cobKingdomsVersion {
+		subHeaderSize = cobKingdomsSubHeader // [soundNameOffArr, len(SoundNames)]
 	}
 	codeOffset := headerSize + subHeaderSize
-	codeSize := len(c.Code)
+	codeSize := uint64(len(code))
 
 	scriptCodeIndexOffset := codeOffset + codeSize
-	scriptNameOffArr := scriptCodeIndexOffset + int(c.NumScripts)*4
-	pieceNameOffArr := scriptNameOffArr + int(c.NumScripts)*4
-	soundNameOffArr := pieceNameOffArr + int(c.NumPieces)*4
-	stringPoolStart := soundNameOffArr + len(c.SoundNames)*4
+	scriptNameOffArr := scriptCodeIndexOffset + uint64(len(c.ScriptCodeIndices))*4
+	pieceNameOffArr := scriptNameOffArr + uint64(len(c.ScriptNames))*4
+	soundNameOffArr := pieceNameOffArr + uint64(len(c.PieceNames))*4
+	stringPoolStart := soundNameOffArr + uint64(len(c.SoundNames))*4
 
 	// String offsets in pool order: scripts → pieces → sound names.
-	cursor := uint32(stringPoolStart)
-	scriptOffsets := make([]uint32, len(c.ScriptNames))
-	for i, name := range c.ScriptNames {
-		scriptOffsets[i] = cursor
-		cursor += uint32(len(name)) + 1
+	cursor := stringPoolStart
+	layout := func(names []string) []uint32 {
+		offsets := make([]uint32, len(names))
+		for i, name := range names {
+			offsets[i] = uint32(cursor)
+			cursor += uint64(len(name)) + 1
+		}
+		return offsets
 	}
-	pieceOffsets := make([]uint32, len(c.PieceNames))
-	for i, name := range c.PieceNames {
-		pieceOffsets[i] = cursor
-		cursor += uint32(len(name)) + 1
-	}
-	soundOffsets := make([]uint32, len(c.SoundNames))
-	for i, name := range c.SoundNames {
-		soundOffsets[i] = cursor
-		cursor += uint32(len(name)) + 1
+	scriptOffsets := layout(c.ScriptNames)
+	pieceOffsets := layout(c.PieceNames)
+	soundOffsets := layout(c.SoundNames)
+	if cursor > cobMaxWrittenFileSize {
+		return fmt.Errorf("cannot write COB: %d bytes exceeds the 32-bit offset range", cursor)
 	}
 
 	header := make([]byte, headerSize)
 	binary.LittleEndian.PutUint32(header[0:4], c.VersionSignature)
-	binary.LittleEndian.PutUint32(header[4:8], c.NumScripts)
-	binary.LittleEndian.PutUint32(header[8:12], c.NumPieces)
-	binary.LittleEndian.PutUint32(header[12:16], c.LengthOfScripts)
+	binary.LittleEndian.PutUint32(header[4:8], uint32(len(c.ScriptCodeIndices)))
+	binary.LittleEndian.PutUint32(header[8:12], uint32(len(c.PieceNames)))
+	binary.LittleEndian.PutUint32(header[12:16], uint32(codeSize/4))
 	binary.LittleEndian.PutUint32(header[16:20], c.NumberOfStaticVars)
 	binary.LittleEndian.PutUint32(header[20:24], c.UKZero)
 	binary.LittleEndian.PutUint32(header[24:28], uint32(scriptCodeIndexOffset))
@@ -402,36 +506,27 @@ func (c *COB) WriteToWriter(w io.Writer) error {
 		}
 	}
 
-	if _, err := w.Write(c.Code); err != nil {
+	if _, err := w.Write(code); err != nil {
 		return err
 	}
 
 	writeOffsets := func(offsets []uint32) error {
-		for _, off := range offsets {
-			buf := make([]byte, 4)
-			binary.LittleEndian.PutUint32(buf, off)
-			if _, err := w.Write(buf); err != nil {
-				return err
-			}
+		buf := make([]byte, 4*len(offsets))
+		for i, off := range offsets {
+			binary.LittleEndian.PutUint32(buf[i*4:], off)
 		}
-		return nil
-	}
-	if err := writeOffsets(c.ScriptCodeIndices); err != nil {
+		_, err := w.Write(buf)
 		return err
 	}
-	if err := writeOffsets(scriptOffsets); err != nil {
-		return err
-	}
-	if err := writeOffsets(pieceOffsets); err != nil {
-		return err
-	}
-	if err := writeOffsets(soundOffsets); err != nil {
-		return err
+	for _, offsets := range [][]uint32{c.ScriptCodeIndices, scriptOffsets, pieceOffsets, soundOffsets} {
+		if err := writeOffsets(offsets); err != nil {
+			return err
+		}
 	}
 
 	writeStrings := func(strs []string) error {
 		for _, s := range strs {
-			if _, err := w.Write([]byte(s)); err != nil {
+			if _, err := io.WriteString(w, s); err != nil {
 				return err
 			}
 			if _, err := w.Write([]byte{0}); err != nil {
@@ -440,14 +535,10 @@ func (c *COB) WriteToWriter(w io.Writer) error {
 		}
 		return nil
 	}
-	if err := writeStrings(c.ScriptNames); err != nil {
-		return err
-	}
-	if err := writeStrings(c.PieceNames); err != nil {
-		return err
-	}
-	if err := writeStrings(c.SoundNames); err != nil {
-		return err
+	for _, names := range [][]string{c.ScriptNames, c.PieceNames, c.SoundNames} {
+		if err := writeStrings(names); err != nil {
+			return err
+		}
 	}
 
 	return nil
