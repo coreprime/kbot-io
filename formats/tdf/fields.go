@@ -89,10 +89,14 @@ func collectFields(t reflect.Type, prefix []int, s *structSpec) {
 			continue
 		}
 		parts := splitTagOptions(tag)
+		// Leading spaces are dropped but a trailing one is kept: a repeated
+		// section field tagged "Schema " matches [Schema 0], [Schema 1], ...
+		// and names new sections the same way.
+		key := strings.TrimLeft(parts[0], " ")
 		fs := fieldSpec{
 			index: appendIndex(prefix, i),
-			key:   strings.TrimSpace(parts[0]),
-			ukey:  foldKey(strings.TrimSpace(parts[0])),
+			key:   key,
+			ukey:  foldKey(key),
 		}
 		for _, o := range parts[1:] {
 			o = strings.TrimSpace(o)

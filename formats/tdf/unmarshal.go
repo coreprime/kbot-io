@@ -24,7 +24,10 @@ import (
 //   - []string / []int ...: a single space-separated value
 //   - struct / *struct: a nested [name]{ } section
 //   - []struct: repeated [name]{ } sections (matched by exact name, or by name
-//     prefix when several share a stem like GADGET0, GADGET1)
+//     prefix when several share a stem like GADGET0, GADGET1); Marshal names
+//     an element whose name field is empty with the tag key and its index, and
+//     a trailing space in the key is kept, so `tdf:"Schema "` reads and
+//     writes [Schema 0], [Schema 1], ...
 //   - map[string]scalar: a section whose keys are dynamic (e.g. [DAMAGE])
 //   - map[string]string tagged `,remaining`: catch-all for unmatched keys
 //   - []struct tagged `,sections`: catch-all for unmatched child sections
