@@ -3,6 +3,7 @@ package scripting
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -45,6 +46,10 @@ type COB struct {
 	// the slice is always nil and the wrapping pieces are omitted.
 	SoundNames []string
 }
+
+// ErrTruncatedInstruction reports an instruction whose opcode or operand
+// words run past the end of the code section.
+var ErrTruncatedInstruction = errors.New("truncated instruction")
 
 // LoadFromFile reads a COB file from the local filesystem
 func LoadFromFile(path string) (*COB, error) {
@@ -201,69 +206,98 @@ func readCString(data []byte) string {
 // Instruction represents a single COB bytecode instruction (nTA format)
 type Instruction struct {
 	Offset   uint32
-	Opcode   uint32 // Full 32-bit nTA opcode
+	Opcode   uint32 // Canonical opcode the game runs (see DispatchOpcode)
 	Operand  int32  // First 32-bit parameter (for 1-param opcodes)
 	Operand2 int32  // Second 32-bit parameter (for 2-param opcodes like TURN)
+	// Raw is the opcode word as stored. It differs from Opcode only for
+	// low-bit variants such as 0x10064001, which the game runs as JUMP.
+	// Zero means "same as Opcode".
+	Raw uint32
 }
 
-// Disassemble disassembles the bytecode into instructions
+// Word returns the opcode word to write for the instruction: Raw, or Opcode
+// when Raw is zero.
+func (i Instruction) Word() uint32 {
+	if i.Raw != 0 {
+		return i.Raw
+	}
+	return i.Opcode
+}
+
+// Mnemonic returns the assembler name of the instruction: the opcode name,
+// followed by "@" and the stored word when that word is a low-bit variant.
+// OpcodeByName reads the result back to the same word.
+func (i Instruction) Mnemonic() string {
+	name := OpcodeName(i.Opcode)
+	if word := i.Word(); word != DispatchOpcode(word) {
+		return fmt.Sprintf("%s@0x%08X", name, word)
+	}
+	return name
+}
+
+// StackEffect returns how many values the instruction pops and pushes when
+// the game (or, for Kingdoms instructions, TA: Kingdoms) runs it. It reports
+// false for words neither game executes.
+func (i Instruction) StackEffect() (pops, pushes int, ok bool) {
+	info, ok := LookupOpcode(i.Word())
+	if !ok {
+		return 0, 0, false
+	}
+	pops = info.Pops
+	if pops == VariablePops {
+		pops = int(i.Operand2)
+	}
+	return pops, info.Pushes, true
+}
+
+// Disassemble decodes the instructions of one script.
+//
+// A script runs from its entry word to the nearest entry of any other
+// script that starts after it, or to the end of the code. Opcode words are
+// decoded with the game's dispatch rule (DispatchOpcode); Raw keeps the
+// stored word. When an instruction's opcode or operand words would run past
+// the end of the code, Disassemble returns the instructions decoded before
+// it together with an error wrapping ErrTruncatedInstruction.
 func (c *COB) Disassemble(scriptIndex int) ([]Instruction, error) {
-	if scriptIndex < 0 || scriptIndex >= int(c.NumScripts) {
+	if scriptIndex < 0 || scriptIndex >= int(c.NumScripts) || scriptIndex >= len(c.ScriptCodeIndices) {
 		return nil, fmt.Errorf("invalid script index %d", scriptIndex)
 	}
 
-	// Calculate script offset per doc: OffsetToScriptCode + (ScriptCodeIndexArray[ScriptNumber] * 4)
-	// But since c.Code already starts at OffsetToScriptCode, we just use the index directly
-	offset := c.ScriptCodeIndices[scriptIndex] * 4
-	if offset >= uint32(len(c.Code)) {
-		return nil, fmt.Errorf("invalid script offset 0x%X", offset)
+	codeLen := uint64(len(c.Code))
+	start := uint64(c.ScriptCodeIndices[scriptIndex]) * 4
+	if start >= codeLen {
+		return nil, fmt.Errorf("invalid script offset 0x%X (code is %d bytes)", start, codeLen)
 	}
+
+	end := codeLen
+	for _, entry := range c.ScriptCodeIndices {
+		if off := uint64(entry) * 4; off > start && off < end {
+			end = off
+		}
+	}
+
+	word := func(pos uint64) uint32 { return binary.LittleEndian.Uint32(c.Code[pos : pos+4]) }
 
 	var instructions []Instruction
-	pos := offset
-
-	// Find end offset (next script or end of code)
-	endPos := uint32(len(c.Code))
-	for i := scriptIndex + 1; i < int(c.NumScripts); i++ {
-		nextOffset := c.ScriptCodeIndices[i] * 4
-		if nextOffset > offset && nextOffset < endPos {
-			endPos = nextOffset
-			break
+	for pos := start; pos < end; {
+		if pos+4 > codeLen {
+			return instructions, fmt.Errorf("%w: partial opcode word at 0x%X", ErrTruncatedInstruction, pos)
 		}
-	}
-
-	// Decode instructions (TA COB format: 32-bit opcode, optional parameters)
-	instCount := 0
-	for pos < endPos && pos+4 <= uint32(len(c.Code)) {
-		// Read 32-bit LITTLE-ENDIAN opcode (as documented in ta-cob-fmt.txt)
-		opcode := uint32(c.Code[pos]) | (uint32(c.Code[pos+1]) << 8) |
-			(uint32(c.Code[pos+2]) << 16) | (uint32(c.Code[pos+3]) << 24)
-		// Check if this opcode expects inline parameters (Post Data)
-		var operand, operand2 int32
-		paramCount := OpcodeParamCount(opcode)
-
-		if paramCount > 0 && pos+4+uint32(paramCount*4) <= uint32(len(c.Code)) {
-			// Read first parameter as little-endian (TA format)
-			operand = int32(uint32(c.Code[pos+4]) | (uint32(c.Code[pos+5]) << 8) |
-				(uint32(c.Code[pos+6]) << 16) | (uint32(c.Code[pos+7]) << 24))
-
-			// Read second parameter if present
-			if paramCount >= 2 && pos+8+4 <= uint32(len(c.Code)) {
-				operand2 = int32(uint32(c.Code[pos+8]) | (uint32(c.Code[pos+9]) << 8) |
-					(uint32(c.Code[pos+10]) << 16) | (uint32(c.Code[pos+11]) << 24))
-			}
+		raw := word(pos)
+		paramCount := uint64(OpcodeParamCount(raw))
+		if pos+4+paramCount*4 > codeLen {
+			return instructions, fmt.Errorf("%w: %s at 0x%X needs %d operand words past the end of the code",
+				ErrTruncatedInstruction, OpcodeName(raw), pos, paramCount)
 		}
-
-		instructions = append(instructions, Instruction{
-			Offset:   pos,
-			Opcode:   opcode,
-			Operand:  operand,
-			Operand2: operand2,
-		})
-
-		// Advance position (4 bytes for opcode + N*4 bytes for parameters)
-		pos += 4 + uint32(paramCount*4)
-		instCount++
+		inst := Instruction{Offset: uint32(pos), Opcode: DispatchOpcode(raw), Raw: raw}
+		if paramCount >= 1 {
+			inst.Operand = int32(word(pos + 4))
+		}
+		if paramCount >= 2 {
+			inst.Operand2 = int32(word(pos + 8))
+		}
+		instructions = append(instructions, inst)
+		pos += 4 + paramCount*4
 	}
 
 	return instructions, nil
@@ -271,10 +305,7 @@ func (c *COB) Disassemble(scriptIndex int) ([]Instruction, error) {
 
 // String returns a string representation of the instruction (TA COB format)
 func (i Instruction) String() string {
-	name := OpcodeName(i.Opcode)
-	if name == "" {
-		name = fmt.Sprintf("UNKNOWN_0x%08X", i.Opcode)
-	}
+	name := i.Mnemonic()
 	if i.Operand != 0 || OpcodeHasInlineParam(i.Opcode) {
 		return fmt.Sprintf("%04X: %-20s %d (0x%X)", i.Offset, name, i.Operand, i.Operand)
 	}
