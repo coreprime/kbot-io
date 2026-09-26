@@ -1,11 +1,9 @@
-// Package pcx provides support for reading and writing PCX image files.
-// PCX is a raster image format originally developed by ZSoft Corporation.
 package pcx
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -17,13 +15,14 @@ import (
 	"github.com/coreprime/kbot-io/palettes"
 )
 
-// Header represents the PCX file header
+// Header is the 128-byte PCX file header. TA 3.1c reads only the
+// manufacturer, version and extent fields; see the package documentation.
 type Header struct {
 	Manufacturer byte   // Always 0x0A
-	Version      byte   // Version information
-	Encoding     byte   // 1 = RLE encoding
-	BitsPerPixel byte   // Bits per pixel per plane
-	XMin         uint16 // Image dimensions
+	Version      byte   // 5 for 256-colour files; the game loads only version 5
+	Encoding     byte   // 1 = RLE encoding; the game always RLE-decodes
+	BitsPerPixel byte   // Bits per pixel per plane; the game assumes 8
+	XMin         uint16 // Image extent: width is XMax-XMin+1
 	YMin         uint16
 	XMax         uint16
 	YMax         uint16
@@ -31,23 +30,82 @@ type Header struct {
 	VertDPI      uint16 // Vertical DPI
 	Palette      [48]byte
 	Reserved     byte
-	NumPlanes    byte   // Number of color planes
-	BytesPerLine uint16 // Bytes per scan line per plane
+	NumPlanes    byte   // Number of color planes; the game assumes 1
+	BytesPerLine uint16 // Bytes per scan line per plane; ignored by the game
 	PaletteInfo  uint16 // How to interpret palette (1=color, 2=grayscale)
 	HorzScreen   uint16 // Horizontal screen size
 	VertScreen   uint16 // Vertical screen size
 	Filler       [54]byte
 }
 
-// Reader provides methods for reading PCX files
-type Reader struct {
-	r        io.Reader
-	header   Header
-	rawData  []byte // Store raw file data for palette extraction
-	embedded bool   // Whether file has embedded palette
+const (
+	// HeaderSize is the size in bytes of the fixed PCX header.
+	HeaderSize = 128
+	// ColorMapSize is the size in bytes of the trailing 256-colour map
+	// (256 packed RGB triples).
+	ColorMapSize = 768
+	// PaletteMarker is the byte that precedes the trailing colour map in a
+	// standard 256-colour PCX.
+	PaletteMarker = 0x0C
+	// GameVersion is the only PCX version TA 3.1c loads.
+	GameVersion = 5
+	// MinGameFileSize is the smallest file TA 3.1c loads: the header plus the
+	// colour map.
+	MinGameFileSize = HeaderSize + ColorMapSize
+
+	manufacturerZSoft = 0x0A
+	encodingRLE       = 1
+)
+
+// ErrTruncated reports pixel data that ends before the last row.
+var ErrTruncated = errors.New("pcx: pixel data ends before the last row")
+
+// ErrGameRejects is wrapped by DecodeGame errors for files TA 3.1c refuses to
+// load.
+var ErrGameRejects = errors.New("pcx: TA 3.1c does not load this file")
+
+// DecodeMode selects how a Reader interprets a PCX file.
+type DecodeMode int
+
+const (
+	// ModeStandard decodes the file as the PCX specification describes. It
+	// is the default.
+	ModeStandard DecodeMode = iota
+	// ModeGame decodes the file as TA 3.1c does; see the package
+	// documentation.
+	ModeGame
+)
+
+// String returns the mode name.
+func (m DecodeMode) String() string {
+	switch m {
+	case ModeStandard:
+		return "standard"
+	case ModeGame:
+		return "game"
+	default:
+		return fmt.Sprintf("DecodeMode(%d)", int(m))
+	}
 }
 
-// OpenReader opens a PCX file for reading
+// DecodeOptions controls Reader.DecodeWithOptions.
+type DecodeOptions struct {
+	// Mode selects standard (default) or game decoding.
+	Mode DecodeMode
+}
+
+// Reader provides methods for reading PCX files. A Reader is not safe for
+// concurrent use: each decode records whether its pixel data was truncated.
+type Reader struct {
+	header    Header
+	rawData   []byte // the whole file
+	embedded  bool   // a 0x0C marker precedes the last 768 bytes
+	truncated bool   // the last decode ran out of pixel data
+}
+
+// LoadFromReader reads a whole PCX file from r and parses its header. Only
+// the manufacturer byte is checked here; use Compat or DecodeGame to apply the
+// game's rules.
 func LoadFromReader(r io.Reader) (*Reader, error) {
 	// Read entire file to support embedded palettes
 	data, err := io.ReadAll(r)
@@ -55,23 +113,22 @@ func LoadFromReader(r io.Reader) (*Reader, error) {
 		return nil, fmt.Errorf("failed to read PCX data: %w", err)
 	}
 
-	reader := &Reader{
-		r:       bytes.NewReader(data),
-		rawData: data,
-	}
+	reader := &Reader{rawData: data}
 
 	// Read header
-	if err := binary.Read(reader.r, binary.LittleEndian, &reader.header); err != nil {
+	if err := binary.Read(bytes.NewReader(data), binary.LittleEndian, &reader.header); err != nil {
 		return nil, fmt.Errorf("failed to read PCX header: %w", err)
 	}
 
 	// Validate header
-	if reader.header.Manufacturer != 0x0A {
+	if reader.header.Manufacturer != manufacturerZSoft {
 		return nil, fmt.Errorf("invalid PCX file: manufacturer byte is 0x%02X (expected 0x0A)", reader.header.Manufacturer)
 	}
 
-	// Check for embedded palette (marker 0x0C before last 768 bytes)
-	if len(data) >= 769 && data[len(data)-769] == 0x0C {
+	// The marker only counts when it lies after the header: on a file too
+	// short to hold header, marker and colour map it would be a header or
+	// pixel byte.
+	if len(data) >= HeaderSize+1+ColorMapSize && data[len(data)-ColorMapSize-1] == PaletteMarker {
 		reader.embedded = true
 	}
 
@@ -83,14 +140,17 @@ func (r *Reader) Header() *Header {
 	return &r.header
 }
 
-// Width returns the image width
+// Width returns the image width, XMax-XMin+1, computed in full integers so a
+// 65,536-pixel width does not wrap. It is zero or negative when XMax is below
+// XMin.
 func (r *Reader) Width() int {
-	return int(r.header.XMax - r.header.XMin + 1)
+	return int(r.header.XMax) - int(r.header.XMin) + 1
 }
 
-// Height returns the image height
+// Height returns the image height, YMax-YMin+1, computed in full integers. It
+// is zero or negative when YMax is below YMin.
 func (r *Reader) Height() int {
-	return int(r.header.YMax - r.header.YMin + 1)
+	return int(r.header.YMax) - int(r.header.YMin) + 1
 }
 
 // BitsPerPixel returns the total bits per pixel
@@ -98,235 +158,190 @@ func (r *Reader) BitsPerPixel() int {
 	return int(r.header.BitsPerPixel) * int(r.header.NumPlanes)
 }
 
-// maxImagePixels caps the pixel count of a decoded PCX image. XMax/XMin and
-// YMax/YMin are attacker-controlled uint16 fields; an XMax<XMin (or YMax<YMin)
-// header underflows the uint16 subtraction in Width/Height into a value near
-// 65536, which would otherwise force a ~4 GB allocation. The largest stock TA
-// PCX bitmaps are 640x480 (~307K pixels); this ceiling sits far above any real
+// Truncated reports whether the most recent decode ran out of pixel data
+// before the last row. An 8-bit decode still succeeds in that case, with the
+// missing pixels left at index 0.
+func (r *Reader) Truncated() bool {
+	return r.truncated
+}
+
+// maxImagePixels caps the pixel count of a decoded PCX image so that a
+// crafted header cannot force a huge allocation. The largest stock TA PCX
+// bitmaps are 640x480 (~307K pixels); this ceiling sits far above any real
 // asset yet rejects the pathological allocation.
 const maxImagePixels = 64 << 20
 
-// Decode decodes the PCX image and returns an image.Image
+// Decode decodes the image in standard mode (see ModeStandard).
 func (r *Reader) Decode() (image.Image, error) {
-	// Reject headers whose max coordinate is below its min: the uint16
-	// subtraction in Width/Height would wrap around into a huge dimension.
-	if r.header.XMax < r.header.XMin || r.header.YMax < r.header.YMin {
-		return nil, fmt.Errorf("invalid PCX dimensions: XMin=%d XMax=%d YMin=%d YMax=%d",
-			r.header.XMin, r.header.XMax, r.header.YMin, r.header.YMax)
-	}
+	return r.decodeStandard()
+}
 
-	width := r.Width()
-	height := r.Height()
-	bitsPerPixel := r.BitsPerPixel()
-
-	if uint64(width)*uint64(height) > maxImagePixels {
-		return nil, fmt.Errorf("PCX dimensions %dx%d exceed maximum of %d pixels", width, height, maxImagePixels)
-	}
-
-	// Create image based on bit depth
-	var img image.Image
-	var palette color.Palette
-
-	if bitsPerPixel == 8 && r.header.NumPlanes == 1 {
-		// 8-bit paletted image
-		pal, err := r.readPalette()
+// DecodeWithOptions decodes the image in the mode opts selects. In ModeGame
+// the result is always an *image.Paletted.
+func (r *Reader) DecodeWithOptions(opts DecodeOptions) (image.Image, error) {
+	switch opts.Mode {
+	case ModeStandard:
+		return r.decodeStandard()
+	case ModeGame:
+		img, err := r.DecodeGame()
 		if err != nil {
 			return nil, err
 		}
-		palette = pal
+		return img, nil
+	default:
+		return nil, fmt.Errorf("pcx: unknown decode mode %v", opts.Mode)
+	}
+}
 
-		paletted := image.NewPaletted(image.Rect(0, 0, width, height), palette)
+// checkExtent rejects inverted bounds and images above the pixel cap.
+func (r *Reader) checkExtent() error {
+	width, height := r.Width(), r.Height()
+	if width <= 0 || height <= 0 {
+		return fmt.Errorf("invalid PCX dimensions: XMin=%d XMax=%d YMin=%d YMax=%d",
+			r.header.XMin, r.header.XMax, r.header.YMin, r.header.YMax)
+	}
+	if uint64(width)*uint64(height) > maxImagePixels {
+		return fmt.Errorf("PCX dimensions %dx%d exceed maximum of %d pixels", width, height, maxImagePixels)
+	}
+	return nil
+}
 
-		// Decode RLE data
-		if err := r.decodeRLE8(paletted); err != nil {
-			return nil, err
-		}
+// standardStride is the number of bytes decoded per row and plane in standard
+// mode: BytesPerLine, or the width when BytesPerLine is smaller (which the
+// specification does not allow), as the game always decodes width bytes.
+func (r *Reader) standardStride() int {
+	stride := int(r.header.BytesPerLine)
+	if w := r.Width(); stride < w {
+		stride = w
+	}
+	return stride
+}
 
-		img = paletted
-	} else if bitsPerPixel == 24 && r.header.NumPlanes == 3 {
-		// 24-bit RGB image
-		rgba := image.NewRGBA(image.Rect(0, 0, width, height))
+func (r *Reader) decodeStandard() (image.Image, error) {
+	r.truncated = false
+	if err := r.checkExtent(); err != nil {
+		return nil, err
+	}
+	rect := image.Rect(0, 0, r.Width(), r.Height())
 
+	switch {
+	case r.header.BitsPerPixel == 8 && r.header.NumPlanes == 1:
+		paletted := image.NewPaletted(rect, r.standardPalette())
+		r.decodeRLE8(paletted)
+		return paletted, nil
+	case r.header.BitsPerPixel == 8 && r.header.NumPlanes == 3:
+		rgba := image.NewRGBA(rect)
 		if err := r.decodeRLE24(rgba); err != nil {
 			return nil, err
 		}
-
-		img = rgba
-	} else {
+		return rgba, nil
+	default:
 		return nil, fmt.Errorf("unsupported PCX format: %d bits per pixel, %d planes", r.header.BitsPerPixel, r.header.NumPlanes)
 	}
-
-	return img, nil
 }
 
-// readPalette reads the 256-color palette from the PCX file
-func (r *Reader) readPalette() (color.Palette, error) {
-	// Check for embedded palette
-	if r.embedded && len(r.rawData) >= 769 {
-		// Extract palette from end of file (last 768 bytes after 0x0C marker)
-		paletteData := r.rawData[len(r.rawData)-768:]
-		pal := make(color.Palette, 256)
-
-		for i := 0; i < 256; i++ {
-			pal[i] = color.RGBA{
-				R: paletteData[i*3],
-				G: paletteData[i*3+1],
-				B: paletteData[i*3+2],
-				A: 255,
-			}
-		}
-
-		return pal, nil
+// opaquePalette converts packed colour entries of the given size (3 for PCX
+// RGB triples, 4 for .PAL entries) into a fully opaque 256-colour palette.
+func opaquePalette(data []byte, entrySize int) color.Palette {
+	pal := make(color.Palette, 256)
+	for i := range pal {
+		off := i * entrySize
+		pal[i] = color.RGBA{R: data[off], G: data[off+1], B: data[off+2], A: 255}
 	}
-
-	// Use embedded TA palette (most TA PCX files use this palette anyway)
-	palette, err := gaf.LoadPaletteFromBytes(palettes.DefaultPalette)
-	if err != nil {
-		// Fallback to grayscale if TA palette fails
-		pal := make(color.Palette, 256)
-		for i := 0; i < 256; i++ {
-			v := uint8(i)
-			pal[i] = color.RGBA{v, v, v, 255}
-		}
-		return pal, nil
-	}
-
-	// Convert gaf.Palette to color.Palette
-	colorPalette := make(color.Palette, len(palette.Colors))
-	for i, c := range palette.Colors {
-		colorPalette[i] = c
-	}
-
-	return colorPalette, nil
+	return pal
 }
 
-// decodeRLE8 decodes an 8-bit RLE-encoded image
-func (r *Reader) decodeRLE8(img *image.Paletted) error {
-	width := r.Width()
-	height := r.Height()
-	bytesPerLine := int(r.header.BytesPerLine)
-
-	br := bufio.NewReader(r.r)
-	scanline := make([]byte, bytesPerLine)
-
-	for y := 0; y < height; y++ {
-		// Decode one scanline
-		x := 0
-		for x < bytesPerLine {
-			b, err := br.ReadByte()
-			if err != nil {
-				if err == io.EOF {
-					// Hit EOF early - file may be truncated, use what we have
-					return nil
-				}
-				return fmt.Errorf("failed to read RLE data at line %d: %w", y, err)
-			}
-
-			if (b & 0xC0) == 0xC0 {
-				// Run length encoded
-				count := int(b & 0x3F)
-				value, err := br.ReadByte()
-				if err != nil {
-					if err == io.EOF {
-						// Hit EOF early - file may be truncated
-						return nil
-					}
-					return fmt.Errorf("failed to read RLE value at line %d: %w", y, err)
-				}
-
-				for i := 0; i < count && x < bytesPerLine; i++ {
-					scanline[x] = value
-					x++
-				}
-			} else {
-				// Literal byte
-				scanline[x] = b
-				x++
-			}
-		}
-
-		// Copy scanline to image
-		for x := 0; x < width && x < bytesPerLine; x++ {
-			img.SetColorIndex(x, y, scanline[x])
-		}
+// standardPalette returns the palette standard mode uses for an 8-bit image:
+// the marked colour map, or the built-in TA palette when there is no marker.
+// Every entry is opaque.
+func (r *Reader) standardPalette() color.Palette {
+	if r.embedded {
+		return opaquePalette(r.rawData[len(r.rawData)-ColorMapSize:], 3)
 	}
-
-	return nil
+	if len(palettes.DefaultPalette) >= 256*4 {
+		return opaquePalette(palettes.DefaultPalette, 4)
+	}
+	pal := make(color.Palette, 256)
+	for i := range pal {
+		v := uint8(i)
+		pal[i] = color.RGBA{v, v, v, 255}
+	}
+	return pal
 }
 
-// decodeRLE24 decodes a 24-bit RLE-encoded image
-func (r *Reader) decodeRLE24(img *image.RGBA) error {
-	width := r.Width()
-	height := r.Height()
-	bytesPerLine := int(r.header.BytesPerLine)
-
-	br := bufio.NewReader(r.r)
-
-	// Three planes: R, G, B
-	rPlane := make([]byte, bytesPerLine)
-	gPlane := make([]byte, bytesPerLine)
-	bPlane := make([]byte, bytesPerLine)
-
-	for y := 0; y < height; y++ {
-		// Decode R plane
-		if err := r.decodeScanline(br, rPlane); err != nil {
-			return fmt.Errorf("failed to decode R plane at line %d: %w", y, err)
-		}
-
-		// Decode G plane
-		if err := r.decodeScanline(br, gPlane); err != nil {
-			return fmt.Errorf("failed to decode G plane at line %d: %w", y, err)
-		}
-
-		// Decode B plane
-		if err := r.decodeScanline(br, bPlane); err != nil {
-			return fmt.Errorf("failed to decode B plane at line %d: %w", y, err)
-		}
-
-		// Combine planes into RGB pixels
-		for x := 0; x < width && x < bytesPerLine; x++ {
-			img.SetRGBA(x, y, color.RGBA{
-				R: rPlane[x],
-				G: gPlane[x],
-				B: bPlane[x],
-				A: 255,
-			})
-		}
-	}
-
-	return nil
-}
-
-// decodeScanline decodes one RLE-encoded scanline
-func (r *Reader) decodeScanline(br *bufio.Reader, scanline []byte) error {
+// decodeRLERow run-length decodes len(dst) bytes from src starting at pos.
+// A run that passes the end of dst is clipped and the rest of it dropped; a
+// zero-length run consumes its value byte and writes nothing. It returns the
+// position after the row and false when src ends first.
+func decodeRLERow(src []byte, pos int, dst []byte) (int, bool) {
 	x := 0
-	bytesPerLine := len(scanline)
-
-	for x < bytesPerLine {
-		b, err := br.ReadByte()
-		if err != nil {
-			return err
+	for x < len(dst) {
+		if pos >= len(src) {
+			return pos, false
 		}
-
-		if (b & 0xC0) == 0xC0 {
-			// Run length encoded
-			count := int(b & 0x3F)
-			value, err := br.ReadByte()
-			if err != nil {
-				return err
-			}
-
-			for i := 0; i < count && x < bytesPerLine; i++ {
-				scanline[x] = value
-				x++
-			}
-		} else {
-			// Literal byte
-			scanline[x] = b
+		b := src[pos]
+		pos++
+		if b&0xC0 != 0xC0 {
+			dst[x] = b
 			x++
+			continue
+		}
+		count := int(b & 0x3F)
+		if pos >= len(src) {
+			return pos, false
+		}
+		value := src[pos]
+		pos++
+		if count > len(dst)-x {
+			count = len(dst) - x
+		}
+		for i := 0; i < count; i++ {
+			dst[x+i] = value
+		}
+		x += count
+	}
+	return pos, true
+}
+
+// decodeRLE8 decodes 8-bit single-plane rows in standard mode, recording
+// truncation instead of failing.
+func (r *Reader) decodeRLE8(img *image.Paletted) {
+	width := img.Rect.Dx()
+	src := r.rawData[HeaderSize:]
+	scanline := make([]byte, r.standardStride())
+	pos := 0
+	for y := 0; y < img.Rect.Dy(); y++ {
+		clear(scanline)
+		var ok bool
+		pos, ok = decodeRLERow(src, pos, scanline)
+		copy(img.Pix[y*img.Stride:y*img.Stride+width], scanline)
+		if !ok {
+			r.truncated = true
+			return
 		}
 	}
+}
 
+// decodeRLE24 decodes 24-bit three-plane rows in standard mode.
+func (r *Reader) decodeRLE24(img *image.RGBA) error {
+	width := img.Rect.Dx()
+	src := r.rawData[HeaderSize:]
+	stride := r.standardStride()
+	planes := [3][]byte{make([]byte, stride), make([]byte, stride), make([]byte, stride)}
+	pos := 0
+	for y := 0; y < img.Rect.Dy(); y++ {
+		for p, name := range [3]byte{'R', 'G', 'B'} {
+			var ok bool
+			pos, ok = decodeRLERow(src, pos, planes[p])
+			if !ok {
+				r.truncated = true
+				return fmt.Errorf("failed to decode %c plane at line %d: %w", name, y, ErrTruncated)
+			}
+		}
+		for x := 0; x < width; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: planes[0][x], G: planes[1][x], B: planes[2][x], A: 255})
+		}
+	}
 	return nil
 }
 
@@ -471,8 +486,16 @@ func encodeBMP(w io.Writer, img image.Image) error {
 	return nil
 }
 
-// ConvertToGIFWithPalette converts a PCX file to GIF using a custom palette
+// ConvertToGIFWithPalette converts a PCX file to GIF, drawing its pixels
+// with pal instead of the file's own colours. An 8-bit image keeps its palette
+// indices, so each pixel shows pal's colour at the same index (this is how
+// TA: Kingdoms pairs images with separate palettes). A 24-bit image has no
+// indices and is mapped to the nearest colour in pal. pal's colours are used
+// as given, including their alpha.
 func ConvertToGIFWithPalette(w io.Writer, r io.Reader, pal *gaf.Palette) error {
+	if pal == nil {
+		return errors.New("pcx: nil palette")
+	}
 	reader, err := LoadFromReader(r)
 	if err != nil {
 		return err
@@ -483,46 +506,71 @@ func ConvertToGIFWithPalette(w io.Writer, r io.Reader, pal *gaf.Palette) error {
 		return err
 	}
 
-	// Convert GAF palette to color.Palette
 	palette := make(color.Palette, 256)
 	for i := 0; i < 256; i++ {
 		palette[i] = pal.Colors[i]
 	}
 
+	if src, ok := img.(*image.Paletted); ok {
+		remapped := &image.Paletted{Pix: src.Pix, Stride: src.Stride, Rect: src.Rect, Palette: palette}
+		return gif.Encode(w, remapped, nil)
+	}
+
 	bounds := img.Bounds()
 	paletted := image.NewPaletted(bounds, palette)
-
-	// Copy pixels (index mapping)
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			paletted.Set(x, y, img.At(x, y))
 		}
 	}
-
 	return gif.Encode(w, paletted, nil)
 }
 
-// HasEmbeddedPalette returns true if the PCX file has an embedded 256-color palette
+// ConvertToPNGWithOptions converts a PCX image to PNG, decoding it in the
+// mode opts selects. Use ModeGame to preview a file as TA 3.1c draws it.
+func ConvertToPNGWithOptions(w io.Writer, r io.Reader, opts DecodeOptions) error {
+	reader, err := LoadFromReader(r)
+	if err != nil {
+		return err
+	}
+	img, err := reader.DecodeWithOptions(opts)
+	if err != nil {
+		return err
+	}
+	return png.Encode(w, img)
+}
+
+// HasEmbeddedPalette reports whether a 0x0C marker precedes the last 768
+// bytes, which is how the PCX specification marks a 256-colour map. The game
+// uses the last 768 bytes as the palette either way; see GamePalette.
 func (r *Reader) HasEmbeddedPalette() bool {
 	return r.embedded
 }
 
-// EmbeddedPalette returns the 256-color palette embedded at the end of the PCX
-// file as a *gaf.Palette. Returns nil if the file does not carry an embedded
-// palette (PCX header signals the 0x0C marker before the trailing 768 bytes).
+// EmbeddedPalette returns the marked 256-colour map as a *gaf.Palette for
+// drawing sprites, or nil when the file has no 0x0C marker before its last 768
+// bytes.
+//
+// The entries follow the gaf package's palette convention (the same result as
+// gaf.LoadPaletteFromBytes on the colours), including its treatment of index
+// 0. For drawing the image itself use the decoded image's palette or
+// GamePalette, which are opaque.
 //
 // TA: Kingdoms uses sidecar PCX files (often 1x1 px) purely as palette
 // containers next to .gaf files, so this is the canonical way to fish the
 // palette out without re-decoding the image data.
 func (r *Reader) EmbeddedPalette() *gaf.Palette {
-	if !r.embedded || len(r.rawData) < 768 {
+	if !r.embedded {
 		return nil
 	}
-	src := r.rawData[len(r.rawData)-768:]
-	p := &gaf.Palette{}
+	src := r.rawData[len(r.rawData)-ColorMapSize:]
+	entries := make([]byte, 256*4)
 	for i := 0; i < 256; i++ {
-		p.Colors[i] = color.RGBA{R: src[i*3], G: src[i*3+1], B: src[i*3+2], A: 255}
+		copy(entries[i*4:i*4+3], src[i*3:i*3+3])
 	}
-	p.Colors[0].A = 0
+	p, err := gaf.LoadPaletteFromBytes(entries)
+	if err != nil {
+		return nil
+	}
 	return p
 }

@@ -42,6 +42,19 @@ Palettes are fully opaque (index 0 is black); by default exports make only a
 raw frame's stored key, or a compressed frame's skipped pixels, transparent,
 and `TransparencyModeHeuristic` is available for TA: Kingdoms atlases. See
 the package documentation for the full rules.
+### PCX and palettes
+
+- `pcx` decodes to the PCX specification by default. `Reader.DecodeGame`
+  (or `DecodeOptions{Mode: pcx.ModeGame}`) decodes a file the way TA 3.1c
+  does: version 5 only, every file treated as 8-bit single-plane, rows of
+  exactly `width` bytes whatever BytesPerLine says, and the palette taken from
+  the last 768 bytes whether or not a 0x0C marker precedes it.
+  `Reader.Compat` lists every way a file departs from those rules.
+- `pal` reads the first 1,024 bytes of a `.PAL`, as the game does, and
+  `pal.LoadNamed` falls back to `palettes/<name>.pcx` when the `.pal` is
+  missing or empty. `pal.Table` models the lookup tables at their real sizes:
+  PALETTE.ALP is 65,536 bytes (256 × 256 pair blends), PALETTE.SHD and
+  PALETTE.LHT are 8,192 bytes (32 rows of 256).
 
 ## Usage
 
