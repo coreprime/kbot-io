@@ -54,9 +54,10 @@ func (p *Preprocessor) ProcessContent(content, baseDir string) (string, error) {
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 
-		// Handle preprocessor directives
+		// Handle preprocessor directives. A // comment is not part of the
+		// directive (`#define HEALTH 4 // percent` defines HEALTH as 4).
 		if strings.HasPrefix(trimmed, "#") {
-			if err := p.handleDirective(trimmed, baseDir, &result); err != nil {
+			if err := p.handleDirective(stripDirectiveComment(trimmed), baseDir, &result); err != nil {
 				return "", fmt.Errorf("line %d: %w", i+1, err)
 			}
 			continue
@@ -73,6 +74,31 @@ func (p *Preprocessor) ProcessContent(content, baseDir string) (string, error) {
 
 	return result.String(), nil
 }
+
+// stripDirectiveComment removes a trailing // or /* ... */ comment from a
+// directive line, outside double-quoted strings.
+func stripDirectiveComment(line string) string {
+	inString := false
+	for i := 0; i+1 < len(line); i++ {
+		switch {
+		case line[i] == '"':
+			inString = !inString
+		case inString:
+		case line[i] == '/' && line[i+1] == '/':
+			return strings.TrimSpace(line[:i])
+		case line[i] == '/' && line[i+1] == '*':
+			end := strings.Index(line[i+2:], "*/")
+			if end < 0 {
+				return strings.TrimSpace(line[:i])
+			}
+			return stripDirectiveComment(strings.TrimSpace(line[:i] + " " + line[i+2+end+2:]))
+		}
+	}
+	return line
+}
+
+// maxDefineExpansionPasses bounds the rescans of expandDefines.
+const maxDefineExpansionPasses = 16
 
 // handleDirective processes a preprocessor directive
 func (p *Preprocessor) handleDirective(line, baseDir string, result *strings.Builder) error {
@@ -331,18 +357,20 @@ func (p *Preprocessor) isActive() bool {
 func (p *Preprocessor) expandDefines(line string) string {
 	result := line
 
-	// Sort defines by length (longest first) to handle overlapping names
-	var names []string
-	for name := range p.defines {
-		names = append(names, name)
-	}
-
-	// Simple word boundary replacement
-	for _, name := range names {
-		value := p.defines[name]
-		// Match whole words only (not part of identifiers)
-		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-		result = re.ReplaceAllString(result, value)
+	// Expand until nothing changes, so a define whose value uses another
+	// define (#define SFXTYPE_WHITESMOKE (SFXTYPE_POINTBASED | 1)) is fully
+	// replaced whatever order the defines are visited in. The pass limit
+	// stops self-referencing defines.
+	for pass := 0; pass < maxDefineExpansionPasses; pass++ {
+		before := result
+		for name, value := range p.defines {
+			// Match whole words only (not part of identifiers)
+			re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+			result = re.ReplaceAllLiteralString(result, value)
+		}
+		if result == before {
+			break
+		}
 	}
 
 	return result
