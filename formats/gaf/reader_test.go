@@ -295,6 +295,70 @@ func TestReadReportsNestedAndSelfReferencingLayers(t *testing.T) {
 	}
 }
 
+// Layers are placed by hotspot and clipped to the frame on every side;
+// layers with no width or wholly outside the frame draw nothing.
+func TestReadCompositeClipsLayersByHotspot(t *testing.T) {
+	big := FrameInfo{Width: 4, Height: 3, OriginX: 2, OriginY: 2}
+	empty := FrameInfo{Width: 0, Height: 3}
+	far := FrameInfo{Width: 1, Height: 1, OriginX: -5}
+	corner := FrameInfo{Width: 1, Height: 1}
+	b := compositeGAF(FrameInfo{Width: 2, Height: 2, OriginX: 1, OriginY: 1},
+		[]FrameInfo{big, empty, far, corner},
+		[][]byte{{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, {}, {50}, {99}})
+	seqs, r := readGAF(t, b)
+	f := seqs[0].Frames[0]
+	if len(f.Layers) != 4 {
+		t.Fatalf("got %d layers, want 4", len(f.Layers))
+	}
+	if !bytes.Equal(f.Pixels, []byte{6, 7, 10, 99}) {
+		t.Errorf("Pixels = %v, want [6 7 10 99]", f.Pixels)
+	}
+	if len(r.Warnings()) != 0 {
+		t.Errorf("unexpected warnings: %v", r.Warnings())
+	}
+}
+
+// Many frame headers pointing at one blob of long compressed rows produce
+// little pixel data but make the reader scan the blob once per header; the
+// row bytes count towards the decode limit so the read stops early.
+func TestReadRowBytesCountTowardsDecodeLimit(t *testing.T) {
+	const headers, rows = 200, 100
+	row := make([]byte, 2+0xFFFF)
+	binary.LittleEndian.PutUint16(row, 0xFFFF)
+	for i := 2; i < len(row); i++ {
+		row[i] = 0x01 // skip zero pixels
+	}
+	if headers*rows*len(row) <= maxDecodedBytes || headers*rows > 1<<20 {
+		t.Fatal("the rows must exceed the limit while the pixels stay far below it")
+	}
+
+	g := &gafBytes{}
+	g.add(Header{Version: VersionTA, SequenceCount: 1})
+	ptr := g.add(uint32(0))
+	s := g.add(SequenceHeader{FrameCount: headers})
+	items := g.add(make([]FrameListItem, headers))
+	infos := make([]FrameInfo, headers)
+	for i := range infos {
+		infos[i] = FrameInfo{Width: 1, Height: rows, Compressed: 1}
+	}
+	first := g.add(infos)
+	blob := g.add(bytes.Repeat(row, rows))
+	g.set32(ptr, s)
+	for i := uint32(0); i < headers; i++ {
+		f := first + 24*i
+		g.set32(f+frameInfoData, blob)
+		g.set32(items+8*i, f)
+	}
+
+	r, err := LoadFromReader(bytes.NewReader(g.b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ReadSequences(); err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("expected the decode limit to stop the read, got %v", err)
+	}
+}
+
 func TestReadReportsSharedFrameHeaders(t *testing.T) {
 	g := &gafBytes{}
 	g.add(Header{Version: VersionTA, SequenceCount: 1})
@@ -381,7 +445,8 @@ func TestReadDecodeBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dec := &decoder{file: r.file, budget: 500 * 100 * 100, cache: map[uint32]*Frame{}, refs: map[uint32]int{}}
+	dec := newDecoder(r.file)
+	dec.budget = 500 * 100 * 100
 	if _, err := dec.readSequences(r.header); err == nil || !strings.Contains(err.Error(), "limit") {
 		t.Fatalf("expected the decode budget to stop the read, got %v", err)
 	}
@@ -398,7 +463,8 @@ func TestReadFrameRecordLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dec := &decoder{file: r.file, budget: maxDecodedBytes, records: maxFrameRecords, cache: map[uint32]*Frame{}, refs: map[uint32]int{}}
+	dec := newDecoder(r.file)
+	dec.records = maxFrameRecords
 	if _, err := dec.readSequences(r.header); err == nil || !strings.Contains(err.Error(), "frame headers") {
 		t.Fatalf("expected the frame-record limit to stop the read, got %v", err)
 	}

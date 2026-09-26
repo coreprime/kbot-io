@@ -59,9 +59,13 @@
 // game would read on into the following bytes. No stock file has any of
 // these.
 //
-// Reading is bounded: a frame may hold at most 64 Mi pixels, one file may
-// decode to at most 512 MiB of pixel data in total and hold at most 2^20
-// frame headers, so a small crafted file cannot exhaust memory.
+// Reading is bounded: a frame may hold at most 64 Mi pixels and one file at
+// most 2^20 frame headers. One ReadSequences call may use at most 512 MiB of
+// frame data in total, counting both the pixel, coverage and canvas bytes it
+// produces and the compressed row bytes (size words included) it reads, once
+// per frame header that points at them. A small crafted file therefore cannot
+// exhaust memory or keep the reader busy for long; the largest stock file
+// needs about 123 MiB.
 //
 // # Writing
 //

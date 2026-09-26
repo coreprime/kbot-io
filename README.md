@@ -31,11 +31,12 @@ load (nested or shared frame headers, short compressed rows, odd header
 words) are reported by `Reader.Warnings`. The writer keeps each frame's raw
 or compressed storage, the sequence loop word and composite layers;
 `gaf.StorageForPath` names the archives the game needs raw (unit textures and
-the sight masks in `anims/vismasks.gaf`). Palettes are fully opaque (index 0
-is black); by default exports make only a raw frame's stored key, or a
-compressed frame's skipped pixels, transparent, and
-`TransparencyModeHeuristic` is available for TA: Kingdoms atlases. See the
-package documentation for the full rules.
+the sight masks in `anims/vismasks.gaf`). Reading is bounded: the pixel data
+produced plus the compressed row bytes read may not exceed 512 MiB per file.
+Palettes are fully opaque (index 0 is black); by default exports make only a
+raw frame's stored key, or a compressed frame's skipped pixels, transparent,
+and `TransparencyModeHeuristic` is available for TA: Kingdoms atlases. See
+the package documentation for the full rules.
 
 ## Usage
 

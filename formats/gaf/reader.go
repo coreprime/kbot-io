@@ -16,10 +16,13 @@ import (
 // the pathological allocation.
 const maxFramePixels = 64 << 20
 
-// maxDecodedBytes caps the pixel, mask and canvas bytes one ReadSequences
-// call may allocate in total. Frame headers can be referenced from many frame
-// slots, so a small file could otherwise ask for terabytes. The largest stock
-// file (anims/ur-buildings1.gaf) needs about 102 MiB.
+// maxDecodedBytes caps the frame data one ReadSequences call may read and
+// produce in total: the pixel, mask and canvas bytes it allocates plus the
+// compressed row bytes (size words included) it reads and scans. Frame
+// headers, and the row data behind them, can be referenced from many places,
+// so a small file could otherwise ask for terabytes of memory or hours of
+// decoding. The largest stock file (anims/ur-buildings1.gaf) needs about
+// 123 MiB.
 const maxDecodedBytes = 512 << 20
 
 // maxFrameRecords caps the number of frame headers (including layers) one
@@ -141,16 +144,12 @@ func (r *Reader) Warnings() []Warning {
 // storage, flags and unknown words of every sequence and frame are kept so
 // WriteGAF can write them back. Layers that are themselves composites are
 // skipped and reported by Warnings, as are shared frame headers and
-// compressed rows that end before the frame width. A file whose frames would
-// decode to more than 512 MiB in total, or that has more than 2^20 frame
-// headers, is rejected.
+// compressed rows that end before the frame width. A file is rejected when it
+// has more than 2^20 frame headers, or when the pixel data its frames decode
+// to plus the compressed row bytes read for them (counted once per frame
+// header) exceed 512 MiB.
 func (r *Reader) ReadSequences() ([]*Sequence, error) {
-	d := &decoder{
-		file:   r.file,
-		budget: maxDecodedBytes,
-		cache:  make(map[uint32]*Frame),
-		refs:   make(map[uint32]int),
-	}
+	d := newDecoder(r.file)
 	sequences, err := d.readSequences(r.header)
 	d.finishWarnings()
 	r.warnings = d.warnings
@@ -163,13 +162,22 @@ func (r *Reader) ReadSequences() ([]*Sequence, error) {
 // decoder holds the state of one ReadSequences call.
 type decoder struct {
 	file       io.ReadSeeker
-	budget     int64             // decoded bytes still allowed
+	budget     int64             // bytes still allowed to be read or produced
 	records    int               // frame headers visited
 	cache      map[uint32]*Frame // decoded frames by header offset
 	refs       map[uint32]int    // references to each frame header
 	warnings   []Warning
 	suppressed int
 	rowBuf     []byte
+}
+
+func newDecoder(file io.ReadSeeker) *decoder {
+	return &decoder{
+		file:   file,
+		budget: maxDecodedBytes,
+		cache:  make(map[uint32]*Frame),
+		refs:   make(map[uint32]int),
+	}
 }
 
 func (d *decoder) warn(offset int64, format string, args ...any) {
@@ -189,7 +197,7 @@ func (d *decoder) finishWarnings() {
 // charge takes n bytes from the decode budget.
 func (d *decoder) charge(n int) error {
 	if int64(n) > d.budget {
-		return fmt.Errorf("decoded frame data exceeds the %d MiB limit (frame headers referenced too often, or frames too large)", maxDecodedBytes>>20)
+		return fmt.Errorf("frame data read and decoded exceeds the %d MiB limit (frame headers or row data referenced too often, or frames too large)", maxDecodedBytes>>20)
 	}
 	d.budget -= int64(n)
 	return nil
@@ -395,25 +403,25 @@ func (d *decoder) readLayeredFrame(offset uint32, fi *FrameInfo) (*Frame, error)
 		layer.Duration = 0
 		frame.Layers = append(frame.Layers, layer)
 
+		// Draw only the part of the layer inside the canvas, so the work is
+		// bounded by pixels already charged to the budget.
 		dx := int(fi.OriginX) - int(layer.OriginX)
 		dy := int(fi.OriginY) - int(layer.OriginY)
 		lw := int(layer.Width)
-		for y := 0; y < int(layer.Height); y++ {
-			ty := dy + y
-			if ty < 0 || ty >= h {
-				continue
-			}
-			for x := 0; x < lw; x++ {
-				tx := dx + x
-				if tx < 0 || tx >= w {
-					continue
-				}
+		x0, x1 := max(0, -dx), min(lw, w-dx)
+		y0, y1 := max(0, -dy), min(int(layer.Height), h-dy)
+		if x0 >= x1 {
+			continue
+		}
+		for y := y0; y < y1; y++ {
+			for x := x0; x < x1; x++ {
 				src := y*lw + x
 				if !layer.PixelOpaque(src) {
 					continue
 				}
-				canvas[ty*w+tx] = layer.Pixels[src]
-				covered[ty*w+tx] = true
+				dst := (dy+y)*w + dx + x
+				canvas[dst] = layer.Pixels[src]
+				covered[dst] = true
 			}
 		}
 	}
@@ -471,7 +479,9 @@ func (d *decoder) readSimpleFrame(offset uint32, fi *FrameInfo) (*Frame, error) 
 // transparency index; only skipped pixels (and rows with a zero byte count)
 // are transparent. When a frame draws a key-valued pixel, the reader records
 // the frame's Opaque mask. A row whose commands end before the frame width is
-// padded with transparent pixels and reported.
+// padded with transparent pixels and reported. Every row's size word and
+// bytes are charged to the decode budget before they are read, since many
+// frame headers may point at the same row data.
 func (d *decoder) readCompressed(offset uint32, f *Frame) error {
 	width := int(f.Width)
 	key := f.TransparencyIndex
@@ -506,6 +516,9 @@ func (d *decoder) readCompressed(offset uint32, f *Frame) error {
 			return fmt.Errorf("failed to read row %d size: %w", row, err)
 		}
 		rowSize := int(binary.LittleEndian.Uint16(sizeBuf[:]))
+		if err := d.charge(2 + rowSize); err != nil {
+			return err
+		}
 		if cap(d.rowBuf) < rowSize {
 			d.rowBuf = make([]byte, rowSize)
 		}
