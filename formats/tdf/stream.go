@@ -22,6 +22,12 @@ func NewEncoder(w io.Writer) *Encoder {
 
 // Encode renders v as TDF text to the underlying writer and flushes. v must be
 // a struct, a slice of structs, or a pointer to either, exactly as for Marshal.
+//
+// Like Marshal, Encode refuses a key, value or section name that would not
+// read back unchanged (see CheckKey, CheckValue and CheckName), and it does so
+// before writing anything: for a slice, every element is encoded and checked
+// first, then encoded again as it is written, so memory stays bounded by the
+// largest section.
 func (e *Encoder) Encode(v any) error {
 	rv := reflect.ValueOf(v)
 	for rv.Kind() == reflect.Pointer {
@@ -33,6 +39,15 @@ func (e *Encoder) Encode(v any) error {
 
 	switch rv.Kind() {
 	case reflect.Slice:
+		for i := 0; i < rv.Len(); i++ {
+			el, err := encodeElement(rv.Index(i))
+			if err != nil {
+				return err
+			}
+			if err := checkElems([]*element{el}); err != nil {
+				return err
+			}
+		}
 		for i := 0; i < rv.Len(); i++ {
 			el, err := encodeElement(rv.Index(i))
 			if err != nil {

@@ -147,6 +147,24 @@ func TestEncoderPropagatesWriteError(t *testing.T) {
 	}
 }
 
+func TestEncoderRefusesBeforeWritingAnything(t *testing.T) {
+	// Enough sections before the bad one to fill bufio's buffer several
+	// times over.
+	many := make([]sParent, 300)
+	for i := range many {
+		many[i] = sParent{Name: "U", Title: strings.Repeat("x", 64)}
+	}
+	many[len(many)-1].Title = "a;b"
+	var buf bytes.Buffer
+	var we *WriteError
+	if err := NewEncoder(&buf).Encode(many); !errors.As(err, &we) {
+		t.Fatalf("Encode = %v, want a *WriteError", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("Encode wrote %d bytes before refusing", buf.Len())
+	}
+}
+
 // --- decoder ----------------------------------------------------------------
 
 func TestDecoderMatchesUnmarshalSlice(t *testing.T) {
