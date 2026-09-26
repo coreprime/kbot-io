@@ -234,6 +234,24 @@ type Frame struct {
 	Unknown20 uint32
 }
 
+// DisplayTicks returns how many ticks of the 30 Hz animation clock the game
+// shows the frame for: the low 16 bits of Duration, and at least 1.
+func (f *Frame) DisplayTicks() int {
+	return max(int(f.Duration&0xFFFF), 1)
+}
+
+// TotalTicks returns the ticks one pass through the sequence takes: the sum
+// of DisplayTicks over its frames.
+func (s *Sequence) TotalTicks() int {
+	total := 0
+	for _, f := range s.Frames {
+		if f != nil {
+			total += f.DisplayTicks()
+		}
+	}
+	return total
+}
+
 // PixelOpaque reports whether the game draws pixel i (an index into Pixels):
 // the Opaque mask when it is set, otherwise whether the pixel differs from
 // TransparencyIndex. Raw frames always use the key test; for compressed

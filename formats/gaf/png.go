@@ -48,9 +48,11 @@ func (s *Sequence) ToAPNG(palette *Palette, w io.Writer) error {
 }
 
 // ToAPNGWith converts a sequence to an animated PNG (APNG) with explicit
-// transparency options. Frames are placed as in ToGIFWith. A one-frame
-// sequence is written as a still PNG of that frame. Nothing is written if
-// encoding fails.
+// transparency options. Frames are placed as in ToGIFWith. Each frame's
+// delay is its DisplayTicks over 30 seconds, exactly the game's timing, and
+// the animation loops forever when the sequence loops (Sequence.Loops) and
+// plays once otherwise. A one-frame sequence is written as a still PNG of
+// that frame. Nothing is written if encoding fails.
 func (s *Sequence) ToAPNGWith(palette *Palette, opts RenderOptions, w io.Writer) error {
 	if len(s.Frames) == 0 {
 		return fmt.Errorf("no frames in sequence")
@@ -73,7 +75,11 @@ func (s *Sequence) ToAPNGWith(palette *Palette, opts RenderOptions, w io.Writer)
 	// acTL (animation control) must come before IDAT.
 	actl := make([]byte, 8)
 	binary.BigEndian.PutUint32(actl[0:], uint32(len(sc.images))) // num_frames
-	binary.BigEndian.PutUint32(actl[4:], 0)                      // num_plays (0 = infinite)
+	plays := uint32(0)                                           // loop forever
+	if !s.Loops() {
+		plays = 1
+	}
+	binary.BigEndian.PutUint32(actl[4:], plays) // num_plays
 	writeChunk(&out, "acTL", actl)
 
 	writeChunk(&out, "PLTE", plte(sc.palette))
@@ -83,23 +89,19 @@ func (s *Sequence) ToAPNGWith(palette *Palette, opts RenderOptions, w io.Writer)
 
 	sequenceNumber := uint32(0)
 	for frameIdx, canvas := range sc.images {
-		frame := s.Frames[frameIdx]
-		delay := uint16((frame.Duration * 100) / 30)
-		if delay == 0 {
-			delay = 10 // Default ~100ms (10/100 = 0.1s)
-		}
+		delay := uint16(s.Frames[frameIdx].DisplayTicks())
 
 		// fcTL (frame control): every frame covers the whole canvas.
 		fctl := make([]byte, 26)
 		binary.BigEndian.PutUint32(fctl[0:], sequenceNumber)
 		binary.BigEndian.PutUint32(fctl[4:], uint32(sc.width))
 		binary.BigEndian.PutUint32(fctl[8:], uint32(sc.height))
-		binary.BigEndian.PutUint32(fctl[12:], 0) // x_offset
-		binary.BigEndian.PutUint32(fctl[16:], 0) // y_offset
-		binary.BigEndian.PutUint16(fctl[20:], delay)
-		binary.BigEndian.PutUint16(fctl[22:], 100)
-		fctl[24] = 1 // dispose_op: APNG_DISPOSE_OP_BACKGROUND
-		fctl[25] = 0 // blend_op: APNG_BLEND_OP_SOURCE (replace)
+		binary.BigEndian.PutUint32(fctl[12:], 0)              // x_offset
+		binary.BigEndian.PutUint32(fctl[16:], 0)              // y_offset
+		binary.BigEndian.PutUint16(fctl[20:], delay)          // delay_num: ticks
+		binary.BigEndian.PutUint16(fctl[22:], TicksPerSecond) // delay_den
+		fctl[24] = 1                                          // dispose_op: APNG_DISPOSE_OP_BACKGROUND
+		fctl[25] = 0                                          // blend_op: APNG_BLEND_OP_SOURCE (replace)
 		writeChunk(&out, "fcTL", fctl)
 		sequenceNumber++
 

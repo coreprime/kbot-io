@@ -234,28 +234,38 @@ func (s *Sequence) ToGIF(palette *Palette) (*gif.GIF, error) {
 // transparent slot is chosen across the whole sequence, so every frame's
 // transparent pixels (whatever its own key) and the canvas area a frame does
 // not cover render transparent, while palette index 0 stays opaque black.
+//
+// Timing follows the game: each frame shows for DisplayTicks ticks of 1/30 s.
+// GIF delays are whole hundredths of a second, so they are rounded on the
+// running total and the animation keeps the game's overall speed. The GIF
+// loops forever when the sequence loops (Sequence.Loops) and plays once
+// otherwise. Each frame replaces the previous one (background disposal), so
+// transparent areas never show earlier frames.
 func (s *Sequence) ToGIFWith(palette *Palette, opts RenderOptions) (*gif.GIF, error) {
 	sc, err := s.renderCanvases(palette, opts)
 	if err != nil {
 		return nil, err
 	}
 	g := &gif.GIF{
-		Image: sc.images,
-		Delay: make([]int, 0, len(s.Frames)),
+		Image:    sc.images,
+		Delay:    make([]int, 0, len(s.Frames)),
+		Disposal: make([]byte, 0, len(s.Frames)),
 		Config: image.Config{
 			Width:      sc.width,
 			Height:     sc.height,
 			ColorModel: sc.palette.colors,
 		},
 	}
+	if !s.Loops() {
+		g.LoopCount = -1
+	}
+	elapsed, shown := 0, 0 // ticks, hundredths of a second
 	for _, frame := range s.Frames {
-		// Duration is in game ticks (1/30th second); GIF delay is in 1/100th
-		// second, so delay = duration * 100/30 = duration * 10 / 3.
-		delay := int(frame.Duration) * 10 / 3
-		if delay < 1 {
-			delay = 3 // ~30 FPS minimum
-		}
-		g.Delay = append(g.Delay, delay)
+		elapsed += frame.DisplayTicks()
+		due := (elapsed*100 + TicksPerSecond/2) / TicksPerSecond
+		g.Delay = append(g.Delay, due-shown)
+		g.Disposal = append(g.Disposal, gif.DisposalBackground)
+		shown = due
 	}
 	return g, nil
 }

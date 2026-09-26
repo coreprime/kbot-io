@@ -96,4 +96,9 @@
 // key; when a frame draws key-valued pixels, or frames of one animation use
 // each other's keys as colours, an index no drawn pixel uses becomes the
 // slot instead. Layers with the +11 flag are exported as ordinary pixels.
+//
+// Animated exports follow the game's timing: a frame shows for
+// Frame.DisplayTicks ticks of 1/30 s (APNG delays are exactly ticks/30; GIF
+// delays are rounded to hundredths on the running total), and the animation
+// loops forever only when the sequence loops, otherwise it plays once.
 package gaf
