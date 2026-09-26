@@ -59,12 +59,13 @@ type RenderOptions struct {
 	// KeyedTextures skips texels whose alpha is 0, for hosts whose model
 	// textures carry a transparency key (TA: Kingdoms). TA 3.1c samples
 	// model textures without a key and draws every texel, so leave it off
-	// for TA.
+	// for TA. KingdomsRenderOptions turns it on.
 	KeyedTextures bool
 	// TexturePolygons textures uncoloured primitives of any corner count
 	// from three up. TA 3.1c textures only four-corner primitives and draws
 	// nothing for other textured ones, so leave it off for TA; TA: Kingdoms
-	// models carry many textured triangles, so turn it on for them.
+	// models carry many textured triangles, so turn it on for them
+	// (KingdomsRenderOptions does).
 	TexturePolygons bool
 }
 
@@ -83,6 +84,18 @@ func DefaultRenderOptions() RenderOptions {
 		UnitsPerPixel: 65536,
 		CullBackFaces: true,
 	}
+}
+
+// KingdomsRenderOptions returns DefaultRenderOptions set up for TA: Kingdoms
+// models, with KeyedTextures and TexturePolygons turned on: TA: Kingdoms model
+// textures carry a transparency key, and its models have many textured
+// triangles. Everything else matches DefaultRenderOptions, including the TA
+// 3.1c drawing rules described in the package documentation.
+func KingdomsRenderOptions() RenderOptions {
+	o := DefaultRenderOptions()
+	o.KeyedTextures = true
+	o.TexturePolygons = true
+	return o
 }
 
 // defaultBase is the fallback face colour.

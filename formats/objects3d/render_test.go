@@ -3,6 +3,7 @@ package objects3d
 import (
 	"image"
 	"image/color"
+	"reflect"
 	"testing"
 )
 
@@ -424,5 +425,36 @@ func TestRenderCycleSafe(t *testing.T) {
 	m := &Model{Root: root, AllObjects: []*Object{root, child}}
 	if n := countOpaque(m.RenderImage(topDown(nil))); n == 0 {
 		t.Error("nothing drawn")
+	}
+}
+
+// KingdomsRenderOptions differs from DefaultRenderOptions only in turning on
+// keyed sampling and textured polygons, so TA: Kingdoms previews draw their
+// textured triangles and skip keyed texels.
+func TestKingdomsRenderOptions(t *testing.T) {
+	k, d := KingdomsRenderOptions(), DefaultRenderOptions()
+	if !k.KeyedTextures || !k.TexturePolygons {
+		t.Fatalf("KeyedTextures = %v, TexturePolygons = %v, want both on", k.KeyedTextures, k.TexturePolygons)
+	}
+	k.KeyedTextures, k.TexturePolygons = false, false
+	if !reflect.DeepEqual(k, d) {
+		t.Errorf("other fields differ from DefaultRenderOptions:\n%+v\n%+v", k, d)
+	}
+
+	tex := image.NewRGBA(image.Rect(0, 0, 2, 1))
+	tex.SetRGBA(0, 0, blue)
+	copy(tex.Pix[4:], []byte{0xff, 0, 0, 0}) // red with alpha 0
+	mat := &testMaterial{textures: map[string]*image.RGBA{"tex": tex}}
+	opts := KingdomsRenderOptions()
+	opts.AzimuthDeg, opts.ElevationDeg = 0, 90
+	opts.Width, opts.Height = 64, 64
+	opts.FitToFrame = true
+	opts.Material = mat
+	img := triangleModel(Primitive{TextureName: "tex"}).RenderImage(opts)
+	if _, n := meanX(img, "blue"); n == 0 {
+		t.Error("textured triangle not drawn")
+	}
+	if _, n := meanX(img, "red"); n != 0 {
+		t.Errorf("%d keyed texels drawn", n)
 	}
 }

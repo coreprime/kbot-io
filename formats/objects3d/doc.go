@@ -79,7 +79,10 @@
 //
 // These are TA 3.1c's rules. TA: Kingdoms models use the same file format but
 // also carry textured triangles, and their textures are keyed; the renderer's
-// TexturePolygons and KeyedTextures options cover both.
+// TexturePolygons and KeyedTextures options cover both, and
+// KingdomsRenderOptions turns them on. How TA: Kingdoms treats missing
+// textures, the selection primitive, back faces and the X mirror has not been
+// established; the renderer applies TA 3.1c's rules to both games.
 //
 // # Rendering
 //
