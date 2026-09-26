@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/coreprime/kbot-io/testutil"
@@ -30,27 +31,44 @@ func TestLoad3DO(t *testing.T) {
 }
 
 func TestLoadAll3DO(t *testing.T) {
-	root := testutil.UnpackedDir(t, "objects3d")
+	loadCorpus(t, testutil.UnpackedDir(t, "objects3d"))
+}
 
-	entries, _ := os.ReadDir(root)
-	total, passed, failed := 0, 0, 0
+func TestLoadAll3DOKingdoms(t *testing.T) {
+	loadCorpus(t, testutil.TAKUnpackedDir(t, "objects3d"))
+}
+
+// loadCorpus loads every .3do in dir and fails on any load error.
+func loadCorpus(t *testing.T, root string) {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total, objects, siblings, vertices, primitives := 0, 0, 0, 0, 0
 	for _, e := range entries {
-		if filepath.Ext(e.Name()) != ".3do" {
+		if !strings.EqualFold(filepath.Ext(e.Name()), ".3do") {
 			continue
 		}
 		total++
 		data, err := os.ReadFile(filepath.Join(root, e.Name()))
 		if err != nil {
-			failed++
+			t.Errorf("read %s: %v", e.Name(), err)
 			continue
 		}
-		_, err = LoadFromReader(bytes.NewReader(data))
+		m, err := LoadFromReader(bytes.NewReader(data))
 		if err != nil {
-			failed++
 			t.Errorf("FAIL %s: %v", e.Name(), err)
 			continue
 		}
-		passed++
+		objects += len(m.AllObjects)
+		siblings += len(m.RootSiblings)
+		vertices += m.TotalVertices()
+		primitives += m.TotalPrimitives()
 	}
-	t.Logf("3DO corpus: %d total, %d passed, %d failed", total, passed, failed)
+	if total == 0 {
+		t.Fatalf("no .3do files in %s", root)
+	}
+	t.Logf("3DO corpus: %d files, %d objects (%d root siblings), %d vertices, %d primitives",
+		total, objects, siblings, vertices, primitives)
 }
