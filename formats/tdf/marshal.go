@@ -16,6 +16,10 @@ import (
 // Fields are written in struct order, then catch-all entries sorted by key. A
 // value whose source text Unmarshal kept in the catch-all is written as that
 // text while it still reads as the field's value.
+//
+// Marshal refuses a key, value or section name the game would not read back
+// unchanged (see CheckKey, CheckValue and CheckName), NaN, and integers outside
+// the 32-bit range the game reads.
 func Marshal(v any) ([]byte, error) {
 	rv := reflect.ValueOf(v)
 	for rv.Kind() == reflect.Pointer {

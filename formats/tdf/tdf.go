@@ -1,6 +1,7 @@
 package tdf
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"strconv"
@@ -35,8 +36,9 @@ type item struct {
 
 // Field is a key=value pair of a section.
 type Field struct {
-	key   string
-	value string
+	key     string
+	value   string
+	invalid string // why value cannot be written, when set from a NaN
 }
 
 // Key returns the field key, spelled as first written.
@@ -158,11 +160,41 @@ func (d *Document) HasSection(name string) bool {
 
 // Write writes the document as TDF text: top-level fields and sections in
 // order, sections in the retail layout ("[NAME]", then the braces and fields
-// indented one tab). Comments and the original spacing are not kept.
+// indented one tab). It fails, before writing anything, on a key, value or
+// section name that would not read back unchanged (see CheckKey, CheckValue
+// and CheckName). Comments and the original spacing are not kept.
 func (d *Document) Write(w io.Writer) error {
+	if err := d.root.check(); err != nil {
+		return err
+	}
 	e := &errWriter{w: &ioTokenWriter{w: w}}
 	d.root.writeItems(e, 0, "\n")
 	return e.err
+}
+
+func (s *Section) check() error {
+	for _, it := range s.items {
+		if it.section != nil {
+			if err := CheckName(it.section.name); err != nil {
+				return err
+			}
+			if err := it.section.check(); err != nil {
+				return err
+			}
+			continue
+		}
+		f := it.field
+		if f.invalid != "" {
+			return &WriteError{"value", f.value, f.invalid}
+		}
+		if err := CheckKey(f.key); err != nil {
+			return err
+		}
+		if err := CheckValue(f.value); err != nil {
+			return fmt.Errorf("%w (key %q)", err, f.key)
+		}
+	}
+	return nil
 }
 
 // writeItems writes a section's items, each line ended by nl; depth is the
@@ -217,7 +249,7 @@ func (d *Document) WriteFile(path string) error {
 	return file.Close()
 }
 
-// String returns the TDF content as a string.
+// String returns the TDF content as a string, or "" when Write would fail.
 func (d *Document) String() string {
 	var sb strings.Builder
 	if err := d.Write(&sb); err != nil {
@@ -244,11 +276,15 @@ func (s *Section) Get(key string) (string, bool) {
 // keeps its key spelling and position; a new one is added after the section's
 // other items.
 func (s *Section) Set(key, value string) {
+	s.set(key, value, "")
+}
+
+func (s *Section) set(key, value, invalid string) {
 	if field, exists := s.index[foldKey(key)]; exists {
-		field.value = value
+		field.value, field.invalid = value, invalid
 		return
 	}
-	field := &Field{key: key, value: value}
+	field := &Field{key: key, value: value, invalid: invalid}
 	s.index[foldKey(key)] = field
 	s.items = append(s.items, item{field: field})
 }
@@ -332,9 +368,16 @@ func (s *Section) SetInt(key string, value int) {
 	s.Set(key, strconv.Itoa(value))
 }
 
-// SetFloat sets a float value
+// SetFloat sets a float value. An infinity is written as ±1e999, which the
+// game reads back as the same infinity; a NaN has no TDF form, so Write fails
+// on it.
 func (s *Section) SetFloat(key string, value float64) {
-	s.Set(key, strconv.FormatFloat(value, 'f', -1, 64))
+	text, err := formatFloat(value, 64)
+	if err != nil {
+		s.set(key, "NaN", "NaN has no TDF representation")
+		return
+	}
+	s.set(key, text, "")
 }
 
 // SetBool sets a boolean value (as 1 or 0)

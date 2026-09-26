@@ -96,6 +96,11 @@
 // written back the same way (such as "13O", read as 13) also keeps its text in
 // the struct's ",remaining" catch-all, so Marshal reproduces it.
 //
+// Writers refuse keys, values and section names the grammar cannot carry
+// (see CheckKey, CheckValue and CheckName): the grammar has no escaping, so a
+// ';' in a value, a "//" in a URL or a ']' in a section name would change what
+// the game reads.
+//
 // # Rewriting
 //
 // A rewrite by Marshal, Canonicalize or Document.Write normalises layout and

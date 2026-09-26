@@ -33,13 +33,39 @@ func (e *errWriter) ch(c byte) {
 	}
 }
 
-// writeElems renders elements back to TDF text with tab indentation.
+// writeElems renders elements back to TDF text with tab indentation. It
+// refuses (before writing it) any key, value or section name that would not
+// read back unchanged.
 func writeElems(w tokenWriter, els []*element, depth int) error {
+	if err := checkElems(els); err != nil {
+		return err
+	}
 	e := &errWriter{w: w}
 	for _, el := range els {
 		e.writeElem(el, depth)
 	}
 	return e.err
+}
+
+func checkElems(els []*element) error {
+	for _, el := range els {
+		if el.section {
+			if err := CheckName(el.key); err != nil {
+				return err
+			}
+			if err := checkElems(el.children); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := CheckKey(el.key); err != nil {
+			return err
+		}
+		if err := CheckValue(el.value); err != nil {
+			return fmt.Errorf("%w (key %q)", err, el.key)
+		}
+	}
+	return nil
 }
 
 func (e *errWriter) writeElem(el *element, depth int) {
@@ -65,11 +91,83 @@ func (e *errWriter) writeElem(el *element, depth int) {
 	e.str(";\n")
 }
 
+// WriteError reports text that cannot be written as TDF because the game
+// would read something else back.
+type WriteError struct {
+	What   string // "key", "value" or "section name"
+	Text   string
+	Reason string
+}
+
+func (e *WriteError) Error() string {
+	return fmt.Sprintf("tdf: %s %q cannot be written: %s", e.What, e.Text, e.Reason)
+}
+
+// checkText applies the rules every written token shares. The grammar has no
+// escaping: a NUL ends the text, "//" and "/*" start comments, and the game
+// trims spaces, tabs, CRs and LFs from both ends of every token.
+func checkText(what, s string) error {
+	switch {
+	case strings.IndexByte(s, 0) >= 0:
+		return &WriteError{what, s, "contains a NUL byte, which ends the text"}
+	case strings.Contains(s, "//") || strings.Contains(s, "/*"):
+		return &WriteError{what, s, "contains a comment start (// or /*)"}
+	case s != trimSeparators(s):
+		return &WriteError{what, s, "starts or ends with a space, tab or line break, which is trimmed"}
+	}
+	return nil
+}
+
+// CheckKey reports whether key can be written as a field key and read back
+// unchanged: it must not contain '=' (which ends a key), start with '[' or '}'
+// (which start a section or end one), contain a NUL, "//" or "/*", or start or
+// end with a separator.
+func CheckKey(key string) error {
+	if err := checkText("key", key); err != nil {
+		return err
+	}
+	if strings.IndexByte(key, '=') >= 0 {
+		return &WriteError{"key", key, "contains '=', which ends a key"}
+	}
+	if key != "" && (key[0] == '[' || key[0] == '}') {
+		return &WriteError{"key", key, "starts with '[' or '}', which reads as a section boundary"}
+	}
+	return nil
+}
+
+// CheckValue reports whether value can be written as a field value and read
+// back unchanged: it must not contain ';' (which ends a value), a NUL, "//" or
+// "/*", or start or end with a separator. Braces, brackets, '=' and line
+// breaks are allowed: a value runs to the next ';' whatever it contains.
+func CheckValue(value string) error {
+	if err := checkText("value", value); err != nil {
+		return err
+	}
+	if strings.IndexByte(value, ';') >= 0 {
+		return &WriteError{"value", value, "contains ';', which ends a value"}
+	}
+	return nil
+}
+
+// CheckName reports whether name can be written as a section name and read
+// back unchanged: it must not contain ']' (which ends a name), a NUL, "//" or
+// "/*", or start or end with a separator.
+func CheckName(name string) error {
+	if err := checkText("section name", name); err != nil {
+		return err
+	}
+	if strings.IndexByte(name, ']') >= 0 {
+		return &WriteError{"section name", name, "contains ']', which ends a section name"}
+	}
+	return nil
+}
+
 // Canonicalize parses TDF bytes and re-emits them with normalised whitespace
 // and comments removed, keeping every section (in order, duplicates included)
 // and every field value exactly as the game reads it. Text after a stray '}'
 // outside any section is dropped, as the game ignores it. Running it twice is
-// idempotent.
+// idempotent. The output is not byte-identical to the input, so hashes the game
+// takes over file or section bytes change (see the package documentation).
 func Canonicalize(data []byte) ([]byte, error) {
 	els, err := parseDocument(data)
 	if err != nil {

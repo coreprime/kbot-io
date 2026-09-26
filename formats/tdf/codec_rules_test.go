@@ -1,6 +1,8 @@
 package tdf
 
 import (
+	"errors"
+	"math"
 	"strings"
 	"testing"
 )
@@ -184,5 +186,71 @@ func TestCodecFoldsASCIIOnly(t *testing.T) {
 	}
 	if r.Name != "a" || r.Extra["cafÉ"] != "b" || r.Extra["x\xC9"] != "1" || r.Extra["X\xE9"] != "2" {
 		t.Errorf("got %q", r)
+	}
+}
+
+func TestMarshalRefusesUnrepresentableText(t *testing.T) {
+	type rec struct {
+		Name  string            `tdf:",name"`
+		S     string            `tdf:"s,omitempty"`
+		F     float64           `tdf:"f,omitempty"`
+		I     int64             `tdf:"i,omitempty"`
+		U     uint64            `tdf:"u,omitempty"`
+		Extra map[string]string `tdf:",remaining"`
+	}
+	for _, r := range []rec{
+		{Name: "A", S: "a;b"},
+		{Name: "A", S: "See http://tauniverse.com"},
+		{Name: "A", S: "x /* y"},
+		{Name: "A", S: " lead"},
+		{Name: "A", S: "nul\x00"},
+		{Name: "A]", S: "x"},
+		{Name: "A", Extra: map[string]string{"k=v": "1"}},
+		{Name: "A", Extra: map[string]string{"[k": "1"}},
+		{Name: "A", F: math.NaN()},
+		{Name: "A", I: math.MaxInt32 + 1},
+		{Name: "A", U: math.MaxUint32 + 1},
+	} {
+		if out, err := Marshal([]rec{r}); err == nil {
+			t.Errorf("Marshal(%+v) = %q, want an error", r, out)
+		}
+	}
+	var we *WriteError
+	if _, err := Marshal([]rec{{Name: "A", S: "a;b"}}); !errors.As(err, &we) || we.What != "value" {
+		t.Errorf("want a *WriteError for the value, got %v", err)
+	}
+	out, err := Marshal([]rec{{Name: "A", S: "a}b{c=d\r\ne", F: math.Inf(1), I: math.MinInt32}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back []rec
+	if err := Unmarshal(out, &back); err != nil || back[0].S != "a}b{c=d\r\ne" || !math.IsInf(back[0].F, 1) || back[0].I != math.MinInt32 {
+		t.Errorf("representable text must round-trip: %v %+v\n%s", err, back, out)
+	}
+}
+
+func TestCheckFunctions(t *testing.T) {
+	for _, k := range []string{"UnitName", ";y", "a}b", "", "a b"} {
+		if err := CheckKey(k); err != nil {
+			t.Errorf("CheckKey(%q) = %v", k, err)
+		}
+	}
+	for _, k := range []string{"a=b", "[a", "}a", "a//b", " a", "a\n"} {
+		if CheckKey(k) == nil {
+			t.Errorf("CheckKey(%q) accepted", k)
+		}
+	}
+	for _, v := range []string{"", "a b", "1}", "x=y", "line\nbreak", "http:/x"} {
+		if err := CheckValue(v); err != nil {
+			t.Errorf("CheckValue(%q) = %v", v, err)
+		}
+	}
+	for _, v := range []string{";", "a//", "/*", "\t", "x\x00"} {
+		if CheckValue(v) == nil {
+			t.Errorf("CheckValue(%q) accepted", v)
+		}
+	}
+	if CheckName("Schema 0") != nil || CheckName("a]") == nil || CheckName("a[b") != nil {
+		t.Error("CheckName")
 	}
 }

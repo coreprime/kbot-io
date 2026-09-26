@@ -2,6 +2,7 @@ package tdf
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -74,6 +75,11 @@ func setScalar(f reflect.Value, s string) error {
 // ScalarMarshaler render themselves; a non-nil pointer is always treated as
 // present so a pointer-to-custom field round-trips even when its value is the
 // zero value (e.g. an RGBString of "0 0 0").
+//
+// A value the game cannot read back as the same number is an error: NaN, and
+// integers outside the 32-bit range the game reads (signed kinds must fit an
+// int32, unsigned ones a uint32). An infinite float is written as ±1e999, which
+// the game reads back as the same infinity.
 func getScalar(f reflect.Value) (string, bool, error) {
 	if f.CanInterface() {
 		if m, ok := f.Interface().(ScalarMarshaler); ok {
@@ -102,19 +108,37 @@ func getScalar(f reflect.Value) (string, bool, error) {
 		return "0", true, nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		i := f.Int()
+		if i < math.MinInt32 || i > math.MaxInt32 {
+			return "", false, fmt.Errorf("tdf: integer %d is outside the 32-bit range the game reads", i)
+		}
 		return strconv.FormatInt(i, 10), i == 0, nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		u := f.Uint()
+		if u > math.MaxUint32 {
+			return "", false, fmt.Errorf("tdf: integer %d is outside the 32-bit range the game reads", u)
+		}
 		return strconv.FormatUint(u, 10), u == 0, nil
 	case reflect.Float32:
-		v := f.Float()
-		return strconv.FormatFloat(v, 'f', -1, 32), v == 0, nil
+		s, err := formatFloat(f.Float(), 32)
+		return s, f.Float() == 0, err
 	case reflect.Float64:
-		v := f.Float()
-		return strconv.FormatFloat(v, 'f', -1, 64), v == 0, nil
+		s, err := formatFloat(f.Float(), 64)
+		return s, f.Float() == 0, err
 	default:
 		return "", true, nil
 	}
+}
+
+func formatFloat(v float64, bits int) (string, error) {
+	switch {
+	case math.IsNaN(v):
+		return "", fmt.Errorf("tdf: NaN has no TDF representation")
+	case math.IsInf(v, 1):
+		return "1e999", nil
+	case math.IsInf(v, -1):
+		return "-1e999", nil
+	}
+	return strconv.FormatFloat(v, 'f', -1, bits), nil
 }
 
 // setScalarList parses a single value into a slice. With an empty delim the

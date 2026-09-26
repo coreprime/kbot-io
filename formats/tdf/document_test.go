@@ -2,6 +2,7 @@ package tdf
 
 import (
 	"errors"
+	"math"
 	"strings"
 	"testing"
 )
@@ -191,6 +192,37 @@ func TestDocumentParsesVeryLongLines(t *testing.T) {
 	}
 	if got := doc.Section("A").String("desc"); got != long {
 		t.Errorf("len = %d", len(got))
+	}
+}
+
+func TestDocumentWriteRefusesUnrepresentableText(t *testing.T) {
+	for _, set := range []func(s *Section){
+		func(s *Section) { s.Set("desc", "See http://example.com") },
+		func(s *Section) { s.Set("desc", "a;b") },
+		func(s *Section) { s.Set("a=b", "1") },
+		func(s *Section) { s.Set("k", " padded") },
+		func(s *Section) { s.SetFloat("k", math.NaN()) },
+	} {
+		doc := NewDocument()
+		set(doc.AddSection("A"))
+		var b strings.Builder
+		err := doc.Write(&b)
+		if err == nil {
+			t.Errorf("Write accepted %v", doc.Section("A").Fields()[0])
+		}
+		if b.Len() != 0 {
+			t.Error("Write must not write anything when it fails")
+		}
+	}
+	doc := NewDocument()
+	doc.AddSection("bad]name")
+	if err := doc.Write(&strings.Builder{}); err == nil {
+		t.Error("a ']' in a section name must be refused")
+	}
+	doc = NewDocument()
+	doc.AddSection("A").SetFloat("inf", math.Inf(1))
+	if got := doc.Section("A").Float("inf"); !math.IsInf(got, 1) {
+		t.Errorf("+Inf reads back as %v", got)
 	}
 }
 
