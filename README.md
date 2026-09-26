@@ -58,6 +58,47 @@ zero as different. `Document.Bytes` rewrites a parsed file in place, changing
 only the edited values, so comments, layout and the hashes the game takes over
 file text survive.
 
+## Game data
+
+`formats/gamedata/ta` and `formats/gamedata/tak` map FBI, weapon, feature,
+moveinfo, sidedata, sound, download, GUI and OTA files onto Go structs (shared
+fields live in `formats/gamedata/common`). Every struct records key presence
+with `tdf.Meta` and keeps the keys and sections it does not model, so a file
+decoded and marshalled again loads exactly as before in the game: explicit
+zeros such as ARMSOLAR's `MaxWaterDepth=0;`, fractions such as
+`metalpershot=0.5;`, the header's spelling and every section, in order. A
+second section the game never reads (a second `[UNITINFO]` or `[specials]`)
+is kept apart from the first, which the typed field holds.
+
+The typed fields hold the values as written. For TA, the `Effective`
+accessors return what TA 3.1c uses: its defaults for missing keys (standing
+orders 2, weapon range 32767, feature `autoreclaimable` 1, OTA feature
+positions -1), the widths it stores values in, and fractions an int field
+cannot hold. The resolvers follow the game's lookups:
+
+- `UnitInfo.Movement`: a unit naming a movement class takes the class's
+  footprint, water depths and slopes, with the game's defaults for keys the
+  class omits (10000, -10000, 255, half the maximum slope); only `[CLASS0]` to
+  `[CLASS31]` exist.
+- `WeaponTable`: weapons by ID from `weapons/*.tdf` only (a later file wins,
+  a name resolves to the lowest slot, sections without a valid ID are skipped
+  with a warning).
+- `GameSides` (`SIDE0`..`SIDE4`, up to the first gap),
+  `CanBuildBuilder.BuildList` (`canbuild1`.. up to the first gap, at most 30),
+  `DownloadFile.Menus` (the first five sections of any name) and
+  `SoundClass.Sounds` (`KEY`, `KEY1`.. up to the first gap).
+- OTA: `GlobalHeader.GameSchemas` (`Schema 0`, `Schema 1`, .. up to the first
+  gap), `MultiplayerSchema` (the Network 1..4 schema a game for a number of
+  players uses), `Schema.StartPositions` (`StartPosN` is player slot N-1,
+  `StartPos0` and unnumbered entries included), `NumPlayersText` and
+  `PlayerCounts` (numplayers is display text to the game). New schemas are
+  written as `[Schema N]`, with the space the game looks for.
+
+`Check` methods and functions report what the game ignores or reads
+differently: text longer than its buffers, values outside the bits it keeps,
+sections it never reaches. `maplint` applies the same schema and start
+position rules.
+
 ## Usage
 
 ```go
@@ -72,8 +113,8 @@ import (
 
 Most tests round-trip synthetic data in memory and run without any game
 install. Tests that need real game assets read the `TA_UNPACKED_PATH`
-environment variable; when it is unset they fail unless `ALLOW_SKIP_ASSETS=true`
-is set, in which case they skip:
+environment variable (`TAK_UNPACKED_PATH` for TA: Kingdoms); when it is unset
+they fail unless `ALLOW_SKIP_ASSETS=true` is set, in which case they skip:
 
 ```sh
 ALLOW_SKIP_ASSETS=true go test ./...
