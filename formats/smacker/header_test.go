@@ -2,7 +2,10 @@ package smacker_test
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -210,5 +213,52 @@ func TestRingFrame(t *testing.T) {
 	plain := defaultSpec()
 	if pr := plain.open(t); pr.HasRingFrame() || len(pr.Header().FrameSizes) != 3 {
 		t.Errorf("unflagged file: ring = %v, %d entries", pr.HasRingFrame(), len(pr.Header().FrameSizes))
+	}
+}
+
+// TestBoundsBeforeAllocating checks that header counts larger than the file
+// are refused before any table is allocated from them.
+func TestBoundsBeforeAllocating(t *testing.T) {
+	cases := map[string]func(*smkSpec){
+		"frame count 0xFFFFFFFF": func(s *smkSpec) { s.frames = 0xFFFFFFFF },
+		"frame count 0xFFFFFFFF with ring frame": func(s *smkSpec) {
+			s.frames = 0xFFFFFFFF
+			s.flags = smacker.FlagRingFrame
+		},
+		"frame count one past the table": func(s *smkSpec) {
+			s.frames = 4
+			s.noPayload = true
+			s.trees = nil
+		},
+		"tree size past the end": func(s *smkSpec) {
+			s.noPayload = true
+			s.trees = nil
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := defaultSpec()
+			mutate(&s)
+			data := s.bytes()
+			if name == "tree size past the end" {
+				binary.LittleEndian.PutUint32(data[52:], 0xFFFFFFF0)
+			}
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			_, err := smacker.NewReader(bytes.NewReader(data), int64(len(data)))
+			runtime.ReadMemStats(&after)
+			if !errors.Is(err, smacker.ErrTruncated) {
+				t.Fatalf("err = %v, want ErrTruncated", err)
+			}
+			if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
+				t.Errorf("allocated %d bytes before refusing the file", grew)
+			}
+		})
+	}
+
+	short := defaultSpec().bytes()[:smacker.HeaderSize-1]
+	if _, err := smacker.NewReader(bytes.NewReader(short), int64(len(short))); !errors.Is(err, smacker.ErrTruncated) {
+		t.Errorf("short header: err = %v, want ErrTruncated", err)
 	}
 }

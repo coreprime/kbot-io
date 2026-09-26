@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 )
 
@@ -28,6 +29,9 @@ const (
 	// been established. The shipped TA movies all store -3333 (about 30 fps).
 	DefaultFrameRate = 15.0
 )
+
+// ErrTruncated reports a file too short for the sizes its header declares.
+var ErrTruncated = errors.New("smacker: file is truncated")
 
 // Header flag bits (Header.Flags).
 const (
@@ -212,7 +216,7 @@ func (r *Reader) AudioTracks() []AudioTrack {
 // trees from r, which holds size bytes.
 func readHeader(r io.ReaderAt, size int64) (*Header, error) {
 	if size < HeaderSize {
-		return nil, fmt.Errorf("file is %d bytes, shorter than the %d-byte header", size, HeaderSize)
+		return nil, fmt.Errorf("%w: %d bytes, shorter than the %d-byte header", ErrTruncated, size, HeaderSize)
 	}
 	buf := make([]byte, HeaderSize)
 	if err := readAt(r, buf, 0); err != nil {
@@ -250,6 +254,15 @@ func readHeader(r io.ReaderAt, size int64) (*Header, error) {
 	}
 	entries := int64(h.Frames) + int64(h.RingFrame)
 	off := int64(HeaderSize)
+
+	// Check the tables and trees fit in the file before allocating
+	// anything from the header's counts, so a corrupt count cannot ask for
+	// gigabytes.
+	need := uint64(HeaderSize) + 5*uint64(entries) + uint64(h.TreesSize)
+	if need > uint64(size) || need > math.MaxInt {
+		return nil, fmt.Errorf("%w: %d frame-table entries and %d bytes of Huffman trees need %d bytes, but the file is %d bytes",
+			ErrTruncated, entries, h.TreesSize, need, size)
+	}
 
 	// Frame-size table: one little-endian dword per entry.
 	table := make([]byte, 4*entries)
@@ -297,7 +310,7 @@ func (h *Header) FrameDataSize() uint64 {
 	return total
 }
 
-// readAt fills buf from r at off, treating a short read as io.ErrUnexpectedEOF.
+// readAt fills buf from r at off, reporting a short read as ErrTruncated.
 func readAt(r io.ReaderAt, buf []byte, off int64) error {
 	if len(buf) == 0 {
 		return nil
@@ -307,7 +320,7 @@ func readAt(r io.ReaderAt, buf []byte, off int64) error {
 		return nil
 	}
 	if err == nil || errors.Is(err, io.EOF) {
-		return io.ErrUnexpectedEOF
+		return fmt.Errorf("%w: %w", ErrTruncated, io.ErrUnexpectedEOF)
 	}
 	return err
 }
