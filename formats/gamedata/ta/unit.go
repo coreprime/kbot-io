@@ -1,6 +1,9 @@
 package ta
 
-import "github.com/coreprime/kbot-io/formats/gamedata/common"
+import (
+	"github.com/coreprime/kbot-io/formats/gamedata/common"
+	"github.com/coreprime/kbot-io/formats/tdf"
+)
 
 // UnitInfo is the [UNITINFO] section of a unit's .fbi file. Decode a single
 // file with
@@ -11,13 +14,18 @@ import "github.com/coreprime/kbot-io/formats/gamedata/common"
 // where Unit wraps the single [UNITINFO] section. Fields shared with
 // TA:Kingdoms live on the embedded common.UnitInfoBase; the fields below are
 // unique to Total Annihilation.
+//
+// The fields hold the values as written. The Effective accessors (such as
+// EffectiveStandingMoveOrder and Movement) return what TA 3.1c uses: its
+// default for a key the file leaves out, its number reading (integers for
+// costs, fractions for storage) and the width it stores each value in.
 type UnitInfo struct {
 	common.UnitInfoBase
 
 	Designation string `tdf:"designation,omitempty"`
 
 	BuildCostEnergy int     `tdf:"buildcostenergy,omitempty"`
-	BuildCostMetal  float64 `tdf:"buildcostmetal,omitempty"` // Assuming float, due to name/usage
+	BuildCostMetal  float64 `tdf:"buildcostmetal,omitempty"`
 	BuildTime       int     `tdf:"buildtime,omitempty"`
 	// BuildCost is TA:Kingdoms' single-resource (mana) price; the mana
 	// economy fields below are likewise TA:K-only. They live here because
@@ -29,7 +37,7 @@ type UnitInfo struct {
 	MogriumIncome    float64 `tdf:"mogriumincome,omitempty"`
 	MogriumStorage   int     `tdf:"mogriumstorage,omitempty"`
 
-	DamageModifier float64 `tdf:"damagemodifier,omitempty"` // Assuming float, due to name/usage
+	DamageModifier float64 `tdf:"damagemodifier,omitempty"`
 	MinWaterDepth  int     `tdf:"minwaterdepth,omitempty"`
 
 	// Transports: capacity is the total size budget, size the largest single
@@ -38,11 +46,11 @@ type UnitInfo struct {
 	TransportSize     int `tdf:"transportsize,omitempty"`
 	TransMaxUnits     int `tdf:"transmaxunits,omitempty"`
 
-	EnergyUse     float64 `tdf:"energyuse,omitempty"`     // Assuming float, due to name/usage
-	EnergyMake    float64 `tdf:"energymake,omitempty"`    // Assuming float, due to name/usage
-	MetalMake     float64 `tdf:"metalmake,omitempty"`     // Assuming float, due to name/usage
-	MakesMetal    float64 `tdf:"makesmetal,omitempty"`    // Assuming float, due to name/usage
-	ExtractsMetal float64 `tdf:"extractsmetal,omitempty"` // Assuming float, due to name/usage
+	EnergyUse     float64 `tdf:"energyuse,omitempty"`
+	EnergyMake    float64 `tdf:"energymake,omitempty"`
+	MetalMake     float64 `tdf:"metalmake,omitempty"`
+	MakesMetal    float64 `tdf:"makesmetal,omitempty"`
+	ExtractsMetal float64 `tdf:"extractsmetal,omitempty"`
 	EnergyStorage int     `tdf:"energystorage,omitempty"`
 	MetalStorage  int     `tdf:"metalstorage,omitempty"`
 
@@ -58,8 +66,8 @@ type UnitInfo struct {
 
 	// Movement.
 	SteeringMode    int     `tdf:"steeringmode,omitempty"`
-	Scale           float64 `tdf:"scale,omitempty"`           // Assuming float, due to name/usage
-	AltFromSeaLevel float64 `tdf:"altfromsealevel,omitempty"` // Assuming float, due to name/usage
+	Scale           float64 `tdf:"scale,omitempty"`
+	AltFromSeaLevel float64 `tdf:"altfromsealevel,omitempty"`
 	Amphibious      int     `tdf:"amphibious,omitempty"`
 
 	HoverAttack int `tdf:"hoverattack,omitempty"`
@@ -109,6 +117,19 @@ var _ common.UnitInfo = (*UnitInfo)(nil)
 //
 //	var u ta.Unit
 //	err := tdf.Unmarshal(data, &u)
+//
+// The game reads the first [UNITINFO] of the file; a second one, and any other
+// top-level section, is kept in Sections so the file round-trips.
 type Unit struct {
-	Info UnitInfo `tdf:"unitinfo"`
+	Info UnitInfo `tdf:"UNITINFO"`
+
+	// Sections preserves every other top-level section, including a second
+	// [UNITINFO], in order.
+	Sections []common.Section `tdf:",sections"`
+
+	// Remaining preserves any key=value outside the sections.
+	Remaining map[string]string `tdf:",remaining"`
+
+	// Meta records the source's section order and spelling (see tdf.Meta).
+	Meta tdf.Meta `tdf:",meta"`
 }
