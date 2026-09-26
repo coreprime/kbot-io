@@ -34,6 +34,13 @@ func TestKnownHeader(t *testing.T) {
 	if got := r.Height(); got != 240 {
 		t.Errorf("height = %d, want 240", got)
 	}
+	// Flag 2: the game shows the 240 stored lines as 480, every second one black.
+	if got := r.HeightMode(); got != smacker.HeightInterlaced {
+		t.Errorf("height mode = %v, want interlaced", got)
+	}
+	if got := r.DisplayHeight(); got != 480 {
+		t.Errorf("display height = %d, want 480", got)
+	}
 	if got := r.FrameCount(); got != 599 {
 		t.Errorf("frames = %d, want 599", got)
 	}
@@ -80,6 +87,10 @@ func TestParseAllVideos(t *testing.T) {
 		}
 		defer func() { _ = r.Close() }()
 
+		// The shipped movies are either 640x240 interlaced or 640x304 as stored.
+		if dh := r.DisplayHeight(); dh != 480 && dh != 304 {
+			t.Errorf("%s: display height %d (stored %d, flags %#x)", filepath.Base(path), dh, r.Height(), r.Header().Flags)
+		}
 		if r.Width() <= 0 || r.Height() <= 0 {
 			t.Errorf("%s: bad dimensions %dx%d", filepath.Base(path), r.Width(), r.Height())
 		}
@@ -140,7 +151,8 @@ func TestInfo(t *testing.T) {
 	defer func() { _ = r.Close() }()
 
 	info := r.Info()
-	for _, want := range []string{"Smacker Video File", "SMK2", "640x240", "Frames: 599"} {
+	for _, want := range []string{"Smacker Video File", "SMK2", "640x240", "Display: 640x480 (interlaced)",
+		"Frames: 599", "Track 0: 22050 Hz, 2 channels, 8-bit, compressed"} {
 		if !strings.Contains(info, want) {
 			t.Errorf("Info() missing %q\n%s", want, info)
 		}

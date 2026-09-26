@@ -39,7 +39,40 @@ const (
 	// frame after the last frame, which leads back to the first frame so the
 	// movie can loop. The header's frame count does not include it.
 	FlagRingFrame = 0x01
+	// FlagInterlaced marks a movie the game shows at twice its stored
+	// height with every second line left black: stored line n is drawn on
+	// display line 2n and display line 2n+1 stays blank.
+	FlagInterlaced = 0x02
+	// FlagDoubled marks a movie the game shows at twice its stored height
+	// by drawing every stored line twice.
+	FlagDoubled = 0x04
 )
+
+// HeightMode says how a movie's stored lines map to the lines the game
+// shows, from the FlagInterlaced and FlagDoubled bits.
+type HeightMode int
+
+const (
+	// HeightNormal shows each stored line once.
+	HeightNormal HeightMode = iota
+	// HeightInterlaced (FlagInterlaced alone) shows each stored line
+	// followed by a black line.
+	HeightInterlaced
+	// HeightDoubled (FlagDoubled alone) shows each stored line twice.
+	HeightDoubled
+)
+
+// String returns "normal", "interlaced" or "doubled".
+func (m HeightMode) String() string {
+	switch m {
+	case HeightInterlaced:
+		return "interlaced"
+	case HeightDoubled:
+		return "doubled"
+	default:
+		return "normal"
+	}
+}
 
 // Header represents a Smacker video file header
 type Header struct {
@@ -144,6 +177,41 @@ func (r *Reader) Width() int {
 // Height returns video height
 func (r *Reader) Height() int {
 	return int(r.header.Height)
+}
+
+// DisplayHeight returns the number of lines the game shows; see
+// Header.DisplayHeight.
+func (r *Reader) DisplayHeight() int {
+	return r.header.DisplayHeight()
+}
+
+// HeightMode returns how the stored lines are shown; see Header.HeightMode.
+func (r *Reader) HeightMode() HeightMode {
+	return r.header.HeightMode()
+}
+
+// HeightMode decodes the height bits of Flags. The game doubles the height
+// only when exactly one of FlagInterlaced and FlagDoubled is set; a header
+// with both is shown at its stored height.
+func (h *Header) HeightMode() HeightMode {
+	switch h.Flags & (FlagInterlaced | FlagDoubled) {
+	case FlagInterlaced:
+		return HeightInterlaced
+	case FlagDoubled:
+		return HeightDoubled
+	default:
+		return HeightNormal
+	}
+}
+
+// DisplayHeight returns the number of lines the game shows: twice the
+// stored Height for HeightInterlaced and HeightDoubled, otherwise Height.
+// The shipped 640x240 TA movies are interlaced and show as 640x480.
+func (h *Header) DisplayHeight() int {
+	if h.HeightMode() != HeightNormal {
+		return 2 * int(h.Height)
+	}
+	return int(h.Height)
 }
 
 // FrameCount returns the number of frames the movie shows, excluding any
@@ -334,6 +402,9 @@ func (r *Reader) Info() string {
 		info += fmt.Sprintf("  Signature: %s (TA plays SMK2 only)\n", r.SignatureString())
 	}
 	info += fmt.Sprintf("  Resolution: %dx%d\n", r.Width(), r.Height())
+	if mode := r.HeightMode(); mode != HeightNormal {
+		info += fmt.Sprintf("  Display: %dx%d (%s)\n", r.Width(), r.DisplayHeight(), mode)
+	}
 	info += fmt.Sprintf("  Frames: %d\n", r.FrameCount())
 	if r.HasRingFrame() {
 		info += "  Ring Frame: yes\n"

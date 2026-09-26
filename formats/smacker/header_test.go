@@ -262,3 +262,46 @@ func TestBoundsBeforeAllocating(t *testing.T) {
 		t.Errorf("short header: err = %v, want ErrTruncated", err)
 	}
 }
+
+// TestDisplayHeight checks the height modes: flag 2 (interlaced) and flag 4
+// (doubled) each double the shown height; both together, or neither, keep
+// the stored height.
+func TestDisplayHeight(t *testing.T) {
+	cases := []struct {
+		flags  uint32
+		mode   smacker.HeightMode
+		height int
+	}{
+		{0, smacker.HeightNormal, 240},
+		{smacker.FlagInterlaced, smacker.HeightInterlaced, 480},
+		{smacker.FlagDoubled, smacker.HeightDoubled, 480},
+		{smacker.FlagInterlaced | smacker.FlagDoubled, smacker.HeightNormal, 240},
+		{smacker.FlagRingFrame | smacker.FlagInterlaced, smacker.HeightInterlaced, 480},
+	}
+	for _, c := range cases {
+		s := defaultSpec()
+		s.width, s.height = 640, 240
+		s.flags = c.flags
+		if c.flags&smacker.FlagRingFrame != 0 {
+			s.frameSizes = append(s.frameSizes, 4)
+			s.frameTypes = append(s.frameTypes, 0)
+		}
+		r := s.open(t)
+		if got := r.HeightMode(); got != c.mode {
+			t.Errorf("flags %#x: HeightMode = %v, want %v", c.flags, got, c.mode)
+		}
+		if got := r.DisplayHeight(); got != c.height {
+			t.Errorf("flags %#x: DisplayHeight = %d, want %d", c.flags, got, c.height)
+		}
+		if r.Height() != 240 {
+			t.Errorf("flags %#x: Height = %d, want the stored 240", c.flags, r.Height())
+		}
+		info := r.Info()
+		if c.mode == smacker.HeightNormal && strings.Contains(info, "Display:") {
+			t.Errorf("flags %#x: Info() has a Display line:\n%s", c.flags, info)
+		}
+		if c.mode != smacker.HeightNormal && !strings.Contains(info, "Display: 640x480 ("+c.mode.String()+")") {
+			t.Errorf("flags %#x: Info() lacks the display size:\n%s", c.flags, info)
+		}
+	}
+}
