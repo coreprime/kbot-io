@@ -21,6 +21,10 @@ const TileAnimEntrySize = 132
 // the TileAnim feature table that ships with the TNT (the names referenced
 // by TileAttr.Feature indices).  Pass nil if there are no features.
 //
+// Save always writes version 0x2000. A map read from a 0x1020 file is
+// converted: each cell keeps its height and feature, and the legacy-only
+// bytes (LegacyAttr) are not written.
+//
 // Block layout produced:
 //
 //	0x00            header (64 B)
@@ -55,7 +59,13 @@ func (m *Map) Save(w io.Writer, features []Feature) error {
 	anims := uint32(len(features))
 
 	hdr := m.Header
-	hdr.IDVersion = 8192
+	if m.IsLegacy() {
+		// A 0x1020 map is written in the 0x2000 layout. Its minimap words
+		// move to 0x28/0x2c, so the legacy ones are cleared, and the 0x2c
+		// word, whose 0x1020 meaning is not known, starts from zero.
+		hdr.Unknown1, hdr.Pad3, hdr.Pad4 = 0, 0, 0
+	}
+	hdr.IDVersion = VersionTA
 	hdr.Width = uint32(m.AttrW)
 	hdr.Height = uint32(m.AttrH)
 	hdr.Tiles = tiles

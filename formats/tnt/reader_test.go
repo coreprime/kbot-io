@@ -72,7 +72,7 @@ func TestLoadRejectsOversizedHeaderFields(t *testing.T) {
 		{"huge dimensions", func(b []byte) {
 			putWord(b, offWidth, 0xFFFFFFFF)
 			putWord(b, offHeight, 0xFFFFFFFF)
-		}, "tile map"},
+		}, "attribute block"},
 		{"huge tile count", func(b []byte) { putWord(b, offTiles, 0xFFFFFFFF) }, "tile graphics"},
 		{"huge feature count", func(b []byte) { putWord(b, offTileAnims, 0xFFFFFFFF) }, "feature table"},
 		{"attribute pointer near the end", func(b []byte) { putWord(b, offMapAttr, 0xFFFFFFF0) }, "attribute block"},

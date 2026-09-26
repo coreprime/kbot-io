@@ -9,23 +9,28 @@ import (
 	"image/draw"
 	"image/png"
 	"io"
+	"math/bits"
 	"strings"
 
 	"github.com/coreprime/kbot-io/formats/tnt/tak"
 )
 
-// TNT IDVersion words. TA writes 0x2000; TA: Kingdoms reuses the TNT
-// container with a bumped version word and a different field layout.
+// TNT IDVersion words. TA writes 0x2000 and also loads the older 0x1020
+// layout; TA: Kingdoms reuses the TNT container with a bumped version word and
+// a different field layout that TA does not load.
 const (
-	VersionTA  = 8192  // 0x2000 — Total Annihilation
-	VersionTAK = 16384 // 0x4000 — Total Annihilation: Kingdoms
+	VersionTA     = 8192  // 0x2000 — Total Annihilation
+	VersionLegacy = 4128  // 0x1020 — older Total Annihilation layout (read only)
+	VersionTAK    = 16384 // 0x4000 — Total Annihilation: Kingdoms
 )
 
 // Header is the 64-byte TNT file header.
 //
-// The field names describe the Total Annihilation (0x2000) layout. TA:
-// Kingdoms (0x4000) keeps the same 64-byte size but moves several fields:
-// notably its minimap pointer lands in the Unknown1 slot (offset 0x2c).
+// The field names describe the Total Annihilation (0x2000) layout. The legacy
+// 0x1020 layout matches it except that its minimap pointer and presence
+// flags live in Pad3 (0x38) and Pad4 (0x3c). TA: Kingdoms (0x4000) keeps the
+// same 64-byte size but moves several fields: notably its minimap pointer
+// lands in the Unknown1 slot (offset 0x2c).
 type Header struct {
 	IDVersion   uint32 // 0x2000 (TA) or 0x4000 (TA:K)
 	Width       uint32 // TA: width in 16px attribute cells (tiles = Width/2). TA:K: width in 16px DataUnits.
@@ -41,8 +46,8 @@ type Header struct {
 	Unknown1    uint32 // TA:K: minimap pointer (126×126 block at offset 0x2c).
 	Pad1        uint32
 	Pad2        uint32
-	Pad3        uint32
-	Pad4        uint32
+	Pad3        uint32 // 0x1020: minimap pointer.
+	Pad4        uint32 // 0x1020: minimap presence flags.
 }
 
 // The TA: Kingdoms meaning of each repurposed header slot (sea level, heightmap,
@@ -76,10 +81,25 @@ type TileAttr struct {
 	Pad     uint8
 }
 
+// LegacyTileAttr is one raw 8-byte attribute record of a 0x1020 map. The
+// game reads the height at +0, an 8-bit feature index at +2 and a per-cell
+// byte at +6 that 0x2000 maps do not carry; the other bytes are unused.
+type LegacyTileAttr [8]byte
+
+// legacyFeatureSentinelFloor is the lowest sentinel value of a 0x1020 map's
+// 8-bit feature byte; values at or above it place no feature.
+const legacyFeatureSentinelFloor = 0xFC
+
 // Map is a parsed TNT file.
 type Map struct {
 	Header Header
 	IsTAK  bool // true when the file is a TA: Kingdoms TNT (IDVersion 0x4000)
+
+	// LegacyAttr holds the raw 8-byte attribute records of a 0x1020 map
+	// (nil for every other version). TileAttr carries the same cells in
+	// the 0x2000 form: the height, and the feature byte as a feature
+	// index, or FeatureNone for a byte at or above 0xFC.
+	LegacyAttr []LegacyTileAttr
 
 	TileW    int        // Tile grid width (Header.Width / 2)
 	TileH    int        // Tile grid height (Header.Height / 2)
@@ -134,7 +154,7 @@ func LoadFromReader(r io.ReadSeeker) (*Map, error) {
 	}
 
 	switch m.Header.IDVersion {
-	case VersionTA:
+	case VersionTA, VersionLegacy:
 		// Full TA parse below.
 	case VersionTAK:
 		// TA: Kingdoms reuses the TNT container but repurposes the header
@@ -143,8 +163,8 @@ func LoadFromReader(r io.ReadSeeker) (*Map, error) {
 		// tak subpackage owns that layout.
 		return loadTAK(r, m)
 	default:
-		return nil, fmt.Errorf("unsupported TNT version: %d (expected %d for TA or %d for TA:K)",
-			m.Header.IDVersion, VersionTA, VersionTAK)
+		return nil, fmt.Errorf("unsupported TNT version: %#x (expected %#x or %#x for TA, %#x for TA:K)",
+			m.Header.IDVersion, VersionTA, VersionLegacy, VersionTAK)
 	}
 
 	size, err := streamSize(r)
@@ -157,10 +177,19 @@ func LoadFromReader(r io.ReadSeeker) (*Map, error) {
 	m.AttrW = int(m.Header.Width)
 	m.AttrH = int(m.Header.Height)
 
+	legacy := m.IsLegacy()
+	recSize := uint64(attrRecordSize)
+	if legacy {
+		recSize = legacyAttrRecordSize
+	}
 	tileCells := uint64(m.TileW) * uint64(m.TileH)
 	attrCells := uint64(m.Header.Width) * uint64(m.Header.Height)
+	attrBytes, ok := mulUint64(attrCells, recSize)
+	if !ok {
+		return nil, fmt.Errorf("TNT attribute block size overflows: %dx%d cells", m.Header.Width, m.Header.Height)
+	}
 	tileMap := section{name: "tile map", off: m.Header.PTRMapData, n: tileCells * 2}
-	attrs := section{name: "attribute block", off: m.Header.PTRMapAttr, n: attrCells * attrRecordSize}
+	attrs := section{name: "attribute block", off: m.Header.PTRMapAttr, n: attrBytes}
 	gfx := section{name: "tile graphics", off: m.Header.PTRTileGfx, n: uint64(m.Header.Tiles) * TileGfxSize}
 	feats := section{name: "feature table", off: m.Header.PTRTileAnim, n: uint64(m.Header.TileAnims) * TileAnimEntrySize}
 	for _, s := range []section{tileMap, attrs, gfx, feats} {
@@ -193,12 +222,20 @@ func LoadFromReader(r io.ReadSeeker) (*Map, error) {
 		return nil, fmt.Errorf("failed to read attribute block: %w", err)
 	}
 	m.TileAttr = make([]TileAttr, attrCells)
-	for i := range m.TileAttr {
-		rec := raw[i*attrRecordSize:]
-		m.TileAttr[i] = TileAttr{
-			Height:  rec[0],
-			Feature: binary.LittleEndian.Uint16(rec[1:3]),
-			Pad:     rec[3],
+	if legacy {
+		m.LegacyAttr = make([]LegacyTileAttr, attrCells)
+		for i := range m.TileAttr {
+			copy(m.LegacyAttr[i][:], raw[i*legacyAttrRecordSize:])
+			m.TileAttr[i] = m.LegacyAttr[i].tileAttr()
+		}
+	} else {
+		for i := range m.TileAttr {
+			rec := raw[i*attrRecordSize:]
+			m.TileAttr[i] = TileAttr{
+				Height:  rec[0],
+				Feature: binary.LittleEndian.Uint16(rec[1:3]),
+				Pad:     rec[3],
+			}
 		}
 	}
 
@@ -214,15 +251,45 @@ func LoadFromReader(r io.ReadSeeker) (*Map, error) {
 
 	// Read minimap. A minimap that is out of range or truncated is dropped;
 	// it is only a preview, so the map itself still loads.
-	if m.Header.PTRMinimap > 0 {
-		m.readMinimap(r, m.Header.PTRMinimap, size)
+	if ptr, _ := m.minimapWords(); ptr > 0 {
+		m.readMinimap(r, ptr, size)
 	}
 
 	return m, nil
 }
 
-// attrRecordSize is the on-disk size of one attribute record.
-const attrRecordSize = 4
+// IsLegacy reports whether the map was read from a 0x1020 file.
+func (m *Map) IsLegacy() bool { return m.Header.IDVersion == VersionLegacy }
+
+// minimapWords returns the header's minimap pointer and presence flags: the
+// words at 0x28/0x2c, or 0x38/0x3c for a 0x1020 map.
+func (m *Map) minimapWords() (ptr, flags uint32) {
+	if m.IsLegacy() {
+		return m.Header.Pad3, m.Header.Pad4
+	}
+	return m.Header.PTRMinimap, m.Header.Unknown1
+}
+
+// tileAttr converts a 0x1020 record to the 0x2000 attribute form.
+func (a LegacyTileAttr) tileAttr() TileAttr {
+	f := uint16(a[2])
+	if a[2] >= legacyFeatureSentinelFloor {
+		f = FeatureNone
+	}
+	return TileAttr{Height: a[0], Feature: f}
+}
+
+// Attribute record sizes of the 0x2000 and 0x1020 layouts.
+const (
+	attrRecordSize       = 4
+	legacyAttrRecordSize = 8
+)
+
+// mulUint64 returns a*b and whether it fits in a uint64.
+func mulUint64(a, b uint64) (uint64, bool) {
+	hi, lo := bits.Mul64(a, b)
+	return lo, hi == 0
+}
 
 // maxMinimapSide is the largest minimap edge the reader accepts; a larger
 // stored minimap is dropped.
@@ -275,7 +342,7 @@ func (m *Map) mapDataPadSection(tileMap, attrs section, others ...section) secti
 			return section{}
 		}
 	}
-	if minimap := (section{off: m.Header.PTRMinimap, n: 8}); m.Header.PTRMinimap > 0 && minimap.overlaps(start, end) {
+	if ptr, _ := m.minimapWords(); ptr > 0 && (section{off: ptr, n: 8}).overlaps(start, end) {
 		return section{}
 	}
 	return section{name: "mapdata padding", off: uint32(start), n: end - start}
