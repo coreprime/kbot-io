@@ -22,8 +22,11 @@
 //
 // [ParseTSF] reads sections written as a "[Name]" line, a "{" line and a "}"
 // line, holding "Key = Value;" assignments (one per line; the value ends at
-// the first ';') and nested sections. "//" and "/* */" comments and blank
-// lines may appear anywhere, including between top-level sections.
+// the first ';') and nested sections. Blank lines and "//" and "/* */"
+// comments may appear on any line, including between top-level sections. A
+// comment starts only at the start of a line, after a section header or
+// brace, or after the ';' that ends a value; elsewhere "//" and "/*" are part
+// of the name or value, so a path such as art//a.png is read whole.
 // [Document.String] reproduces a parsed file byte for byte, including
 // indentation, comments and mixed line endings; only nodes that were changed
 // or added are written in the canonical layout.

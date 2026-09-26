@@ -105,3 +105,35 @@ func TestTSFAssignmentValues(t *testing.T) {
 		t.Error("two statements on one line accepted")
 	}
 }
+
+func TestTSFCommentMarkersInsideValues(t *testing.T) {
+	const text = "[A] // header note\n" +
+		"{ /* open */\n" +
+		"\tFilename = art//a.png;\n" +
+		"\tOther = x/*y*/z.png; // note\n" +
+		"\tBare = dir//b.png\n" +
+		"\tLast = v; /* a comment\n" +
+		"\t   that ends */\n" +
+		"} // close\n"
+	doc, err := ParseTSF(text)
+	if err != nil {
+		t.Fatalf("ParseTSF: %v", err)
+	}
+	if got := doc.String(); got != text {
+		t.Fatalf("round trip differs:\n got %q\nwant %q", got, text)
+	}
+	sec := doc.Sections[0]
+	for key, want := range map[string]string{
+		"Filename": "art//a.png",
+		"Other":    "x/*y*/z.png",
+		"Bare":     "dir//b.png",
+		"Last":     "v",
+	} {
+		if v, _ := sec.Get(key); v != want {
+			t.Errorf("%s = %q, want %q", key, v, want)
+		}
+	}
+	if n := len(sec.Body); n != 5 {
+		t.Errorf("body has %d nodes, want 4 assignments and 1 comment line", n)
+	}
+}

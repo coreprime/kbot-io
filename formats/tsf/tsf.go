@@ -113,7 +113,11 @@ func (s *Section) Subsections() []*Section {
 // line. Inside it, each line is a nested section, a "Key = Value;"
 // assignment (the value ends at the first ';', which may be omitted at the
 // end of the line), or a blank or comment line. "//" comments run to the end
-// of the line and "/* */" comments may span lines; both may appear anywhere.
+// of the line and "/* */" comments may span lines. A comment starts only
+// where no value can be running: at the start of a line, after a section
+// header, "{" or "}", or after the ';' that ends a value. Elsewhere "//" and
+// "/*" are ordinary text, so "Filename = art//a.png;" has the value
+// "art//a.png", and a comment after a value needs the ';' before it.
 // Top-level sections may be separated by blank and comment lines.
 func ParseTSF(text string) (*Document, error) {
 	lines := splitLines(text)
@@ -182,7 +186,7 @@ func splitLines(text string) []rawLine {
 
 // stripComments returns each line's text with "//" and "/* */" comments
 // removed (a block comment becomes a space), carrying block comments across
-// lines.
+// lines. Comment markers count only where commentMayStart allows them.
 func stripComments(lines []rawLine) []string {
 	codes := make([]string, len(lines))
 	inBlock := false
@@ -200,10 +204,10 @@ func stripComments(lines []rawLine) []string {
 				k += end + 2
 				inBlock = false
 				b.WriteByte(' ')
-			case strings.HasPrefix(s[k:], "/*"):
+			case strings.HasPrefix(s[k:], "/*") && commentMayStart(b.String()):
 				inBlock = true
 				k += 2
-			case strings.HasPrefix(s[k:], "//"):
+			case strings.HasPrefix(s[k:], "//") && commentMayStart(b.String()):
 				k = len(s)
 			default:
 				b.WriteByte(s[k])
@@ -213,6 +217,16 @@ func stripComments(lines []rawLine) []string {
 		codes[i] = b.String()
 	}
 	return codes
+}
+
+// commentMayStart reports whether a comment can begin after code, the
+// uncommented text read so far on a line: when nothing but white space has
+// been read, after a complete section header, "{" or "}", and after the ';'
+// that ends a value. Anywhere else a comment marker is part of a name or
+// value.
+func commentMayStart(code string) bool {
+	t := strings.TrimSpace(code)
+	return t == "" || t == "{" || t == "}" || isSectionHeader(t) || strings.Contains(t, ";")
 }
 
 type tsfParser struct {
