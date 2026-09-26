@@ -288,6 +288,30 @@ func TestLoadAliasBudget(t *testing.T) {
 	wantMalformed(t, build(64, 256*1024), "overlapping arrays")
 }
 
+// Every string decoded counts against the same budget, so primitives whose
+// texture names start at different offsets inside one long run of text cannot
+// make a small file decode to many times its size.
+func TestLoadStringBudget(t *testing.T) {
+	build := func(prims int) []byte {
+		b := &fileBuilder{}
+		b.alloc(objectHeaderSize)
+		primAt := b.alloc(prims * primitiveRecordSize)
+		text := int(b.str(strings.Repeat("t", maxStringLen-1)))
+		for i := 0; i < prims; i++ {
+			b.prim(primAt+i*primitiveRecordSize, rawPrim{texture: int32(text + i%(maxStringLen-1))})
+		}
+		b.header(0, hdr{version: 1, nPrims: int32(prims), prims: int32(primAt)})
+		return b.buf
+	}
+	// Two hundred distinct names add up to about 0.8 MB: within budget.
+	m := mustLoad(t, build(200))
+	if got := len(m.Root.Primitives[199].TextureName); got != maxStringLen-1-199 {
+		t.Fatalf("texture name of primitive 199 has %d bytes", got)
+	}
+	// Four thousand distinct names decode to about 8 MB from a 132 KB file.
+	wantMalformed(t, build(4000), "overlapping arrays and strings")
+}
+
 // is_colored is a flag word whose bit 0 means coloured; the colour index is
 // the low byte of the stored word. Both raw words are kept.
 func TestLoadColourWords(t *testing.T) {

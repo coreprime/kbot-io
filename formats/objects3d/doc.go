@@ -32,9 +32,10 @@
 //   - a name or texture name with no NUL within 4096 bytes;
 //   - an object header reached twice: a link cycle, or two links to one
 //     subtree (no retail model shares objects);
-//   - arrays that overlap so heavily that decoding them would exceed four
-//     times the file size (plus 1 MiB). Counts are checked against the file
-//     before anything is allocated.
+//   - arrays and strings that overlap so heavily that decoding them would
+//     exceed four times the file size (plus 1 MiB). Counts are checked
+//     against the file before anything is allocated, and every string decoded
+//     is charged with the arrays.
 //
 // Two things are accepted as stored. A vertex index at or past its object's
 // vertex count is kept: the game does not check it, and the renderer skips the

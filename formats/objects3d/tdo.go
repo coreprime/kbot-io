@@ -20,10 +20,10 @@ const (
 // name.
 const maxStringLen = 4096
 
-// Decode budget: headers and arrays may overlap one another, but the records
-// decoded from a file may not add up to more than this many times the file
-// size, plus a fixed allowance. A file whose parts do not overlap decodes at
-// most its own size.
+// Decode budget: headers, arrays and strings may overlap one another, but the
+// records and strings decoded from a file may not add up to more than this
+// many times the file size, plus a fixed allowance. A file whose parts do not
+// overlap decodes at most its own size.
 const (
 	decodeBudgetFactor = 4
 	decodeBudgetSlack  = 1 << 20
@@ -196,9 +196,10 @@ func LoadFromReader(r io.ReadSeeker) (*Model, error) {
 // ErrMalformed, for a truncated root header, a header, array or string that
 // runs past the end of the file, a negative count or offset, a non-empty
 // array at offset 0, a string with no NUL within 4096 bytes, an object header
-// reached twice (a link cycle or a shared subtree), or overlapping arrays that
-// decode to more than four times the file size. Vertex indices past an
-// object's vertex count and any version signature are accepted.
+// reached twice (a link cycle or a shared subtree), or overlapping arrays and
+// strings that decode to more than four times the file size (plus 1 MiB).
+// Vertex indices past an object's vertex count and any version signature are
+// accepted.
 func LoadFromBytes(data []byte) (*Model, error) {
 	if len(data) < objectHeaderSize {
 		return nil, fmt.Errorf("read root object: %w", truncated(len(data)))
@@ -218,7 +219,7 @@ type loader struct {
 	data    []byte
 	seen    map[int64]bool   // object header offsets already loaded
 	strings map[int64]string // strings already read, by offset
-	budget  int64            // bytes of records still allowed to decode
+	budget  int64            // bytes of records and strings still allowed to decode
 }
 
 // pendingObject is an object header still to be loaded.
@@ -370,15 +371,22 @@ func (l *loader) region(off, count, stride int64, header bool) error {
 	if off > size || count > (size-off)/stride {
 		return truncated(len(l.data))
 	}
-	l.budget -= count * stride
+	return l.charge(count * stride)
+}
+
+// charge takes n decoded bytes from the decode budget.
+func (l *loader) charge(n int64) error {
+	l.budget -= n
 	if l.budget < 0 {
-		return fmt.Errorf("overlapping arrays decode to more than %d times the file size: %w", decodeBudgetFactor, ErrMalformed)
+		return fmt.Errorf("overlapping arrays and strings decode to more than %d times the file size: %w", decodeBudgetFactor, ErrMalformed)
 	}
 	return nil
 }
 
 // str reads the NUL-terminated string at off. Strings are cached by offset,
-// so names shared by many primitives are decoded once.
+// so names shared by many primitives are decoded once. Each string decoded is
+// charged, with its NUL, to the decode budget, so many offsets into one long
+// run of text cannot multiply the file's size.
 func (l *loader) str(off int64) (string, error) {
 	if s, ok := l.strings[off]; ok {
 		return s, nil
@@ -400,6 +408,9 @@ func (l *loader) str(off int64) (string, error) {
 		return "", fmt.Errorf("string at 0x%x has no NUL within %d bytes: %w", off, maxStringLen, ErrMalformed)
 	default:
 		return "", fmt.Errorf("string at 0x%x has no NUL before the end of the file: %w", off, truncated(len(l.data)))
+	}
+	if err := l.charge(int64(end) + 1); err != nil {
+		return "", fmt.Errorf("string at 0x%x: %w", off, err)
 	}
 	s := string(rest[:end])
 	l.strings[off] = s
