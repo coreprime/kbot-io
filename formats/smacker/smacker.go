@@ -29,6 +29,14 @@ const (
 	DefaultFrameRate = 15.0
 )
 
+// Header flag bits (Header.Flags).
+const (
+	// FlagRingFrame marks a movie whose tables carry one extra "ring"
+	// frame after the last frame, which leads back to the first frame so the
+	// movie can loop. The header's frame count does not include it.
+	FlagRingFrame = 0x01
+)
+
 // Header represents a Smacker video file header
 type Header struct {
 	Signature uint32 // Should be "SMK2" or "SMK4"
@@ -57,11 +65,16 @@ type Header struct {
 	// format flags). The file has no separate flags table.
 	//
 	// Deprecated: use AudioTrack, which decodes the packed word.
-	AudioFlags   [AudioTrackCount]uint32
-	FrameSizes   []uint32 // Array of frame sizes
-	FrameTypes   []byte   // Array of frame types
-	HuffmanTrees []byte   // Huffman trees data
-	RingFrame    uint32
+	AudioFlags [AudioTrackCount]uint32
+	// FrameSizes and FrameTypes hold every frame-table entry as stored:
+	// Frames entries, plus a last entry for the ring frame when RingFrame
+	// is 1. Each size is used whole as the frame's payload size.
+	FrameSizes   []uint32
+	FrameTypes   []byte
+	HuffmanTrees []byte // Huffman trees data
+	// RingFrame is 1 when FlagRingFrame is set and the tables carry the
+	// extra ring-frame entry, otherwise 0.
+	RingFrame uint32
 }
 
 // Reader wraps a Smacker video file for reading
@@ -129,9 +142,21 @@ func (r *Reader) Height() int {
 	return int(r.header.Height)
 }
 
-// FrameCount returns total number of frames
+// FrameCount returns the number of frames the movie shows, excluding any
+// ring frame.
 func (r *Reader) FrameCount() int {
 	return int(r.header.Frames)
+}
+
+// HasRingFrame reports whether the tables carry an extra ring frame.
+func (r *Reader) HasRingFrame() bool {
+	return r.header.HasRingFrame()
+}
+
+// HasRingFrame reports whether the tables carry an extra ring frame
+// (FlagRingFrame).
+func (h *Header) HasRingFrame() bool {
+	return h.RingFrame != 0
 }
 
 // FrameRate returns frames per second; see Header.FramesPerSecond.
@@ -220,10 +245,13 @@ func readHeader(r io.ReaderAt, size int64) (*Header, error) {
 	}
 	// Bytes 100-103 are an unused dword; the frame-size table follows.
 
-	entries := int64(h.Frames)
+	if h.Flags&FlagRingFrame != 0 {
+		h.RingFrame = 1
+	}
+	entries := int64(h.Frames) + int64(h.RingFrame)
 	off := int64(HeaderSize)
 
-	// Frame-size table: one little-endian dword per frame.
+	// Frame-size table: one little-endian dword per entry.
 	table := make([]byte, 4*entries)
 	if err := readAt(r, table, off); err != nil {
 		return nil, fmt.Errorf("frame-size table: %w", err)
@@ -234,7 +262,7 @@ func readHeader(r io.ReaderAt, size int64) (*Header, error) {
 		h.FrameSizes[i] = le.Uint32(table[4*i:])
 	}
 
-	// Frame-type table: one byte per frame.
+	// Frame-type table: one byte per entry.
 	h.FrameTypes = make([]byte, entries)
 	if err := readAt(r, h.FrameTypes, off); err != nil {
 		return nil, fmt.Errorf("frame-type table: %w", err)
@@ -290,6 +318,9 @@ func (r *Reader) Info() string {
 	info += fmt.Sprintf("  Signature: %s\n", r.SignatureString())
 	info += fmt.Sprintf("  Resolution: %dx%d\n", r.Width(), r.Height())
 	info += fmt.Sprintf("  Frames: %d\n", r.FrameCount())
+	if r.HasRingFrame() {
+		info += "  Ring Frame: yes\n"
+	}
 	info += fmt.Sprintf("  Frame Rate: %.2f fps\n", r.FrameRate())
 	info += fmt.Sprintf("  Duration: %.2f seconds\n", r.Duration())
 	info += fmt.Sprintf("  Has Audio: %v\n", r.HasAudio())

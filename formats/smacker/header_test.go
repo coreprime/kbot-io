@@ -171,3 +171,44 @@ func near(a, b float64) bool {
 	}
 	return d <= 1e-9*(1+b)
 }
+
+// TestRingFrame checks that the ring-frame flag adds one entry to both
+// tables, moving the Huffman trees and payloads 5 bytes later, while the
+// frame count stays at the header's value.
+func TestRingFrame(t *testing.T) {
+	s := defaultSpec()
+	s.flags = smacker.FlagRingFrame
+	s.frameSizes = []uint32{12, 20, 8, 16} // three frames plus the ring frame
+	s.frameTypes = []byte{0x81, 0x02, 0x04, 0x08}
+	data := s.bytes()
+	r := s.open(t)
+	h := r.Header()
+
+	if !r.HasRingFrame() || h.RingFrame != 1 {
+		t.Errorf("HasRingFrame = %v, RingFrame = %d; want true, 1", r.HasRingFrame(), h.RingFrame)
+	}
+	if r.FrameCount() != 3 {
+		t.Errorf("FrameCount = %d, want 3 (ring frame excluded)", r.FrameCount())
+	}
+	if !reflect.DeepEqual(h.FrameSizes, s.frameSizes) || !bytes.Equal(h.FrameTypes, s.frameTypes) {
+		t.Errorf("tables = %v / %x, want %v / %x", h.FrameSizes, h.FrameTypes, s.frameSizes, s.frameTypes)
+	}
+	if !bytes.Equal(h.HuffmanTrees, s.trees) {
+		t.Errorf("HuffmanTrees = %x, want %x", h.HuffmanTrees, s.trees)
+	}
+	if got, want := h.FrameDataOffset(), int64(smacker.HeaderSize+5*4+len(s.trees)); got != want {
+		t.Errorf("FrameDataOffset = %d, want %d", got, want)
+	}
+	if end := h.FrameDataOffset() + int64(h.FrameDataSize()); end != int64(len(data)) {
+		t.Errorf("payloads end at %d, file is %d bytes", end, len(data))
+	}
+	if !strings.Contains(r.Info(), "Ring Frame: yes") {
+		t.Errorf("Info() does not mention the ring frame:\n%s", r.Info())
+	}
+
+	// Without the flag the same header must not read a fourth entry.
+	plain := defaultSpec()
+	if pr := plain.open(t); pr.HasRingFrame() || len(pr.Header().FrameSizes) != 3 {
+		t.Errorf("unflagged file: ring = %v, %d entries", pr.HasRingFrame(), len(pr.Header().FrameSizes))
+	}
+}
